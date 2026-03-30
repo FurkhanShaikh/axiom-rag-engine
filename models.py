@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ class DraftSentence(BaseModel):
 class SynthesizerOutput(BaseModel):
     """Full structured output from the Cognitive Synthesizer node."""
 
-    is_answerable: bool = Field(
+    is_answerable: StrictBool = Field(
         ...,
         description=(
             "Escape hatch. False if the retrieved chunks cannot answer the query. "
@@ -138,7 +138,7 @@ class VerificationResult(BaseModel):
         "hallucinated",
         "conflicted",
     ] = Field(..., description="Human-readable tier label.")
-    mechanical_check: Literal["passed", "failed"]
+    mechanical_check: Literal["passed", "failed", "skipped"]
     semantic_check: Literal["passed", "failed", "skipped"]
     failure_reason: str | None = None
 
