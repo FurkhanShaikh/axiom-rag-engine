@@ -68,6 +68,10 @@ class AxiomRequest(BaseModel):
     app_config: AppConfig = Field(default_factory=AppConfig)
     models: ModelConfig = Field(default_factory=ModelConfig)
     pipeline_config: PipelineConfig = Field(default_factory=PipelineConfig)
+    include_debug: bool = Field(
+        default=False,
+        description="When true, the response includes the full audit trail and pipeline stats.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +179,13 @@ class ConfidenceSummary(BaseModel):
     tier_breakdown: TierBreakdown
 
 
+class DebugInfo(BaseModel):
+    """Optional debug payload included when include_debug=true in the request."""
+
+    audit_trail: list[AuditEvent] = Field(default_factory=list)
+    pipeline_stats: dict = Field(default_factory=dict)
+
+
 class AxiomResponse(BaseModel):
     """Top-level response payload returned to the calling application."""
 
@@ -186,6 +197,10 @@ class AxiomResponse(BaseModel):
     error_message: str | None = Field(
         default=None,
         description="Human-readable error detail; populated only when status='error'.",
+    )
+    debug: DebugInfo | None = Field(
+        default=None,
+        description="Full audit trail and pipeline stats. Populated only when include_debug=true.",
     )
 
 

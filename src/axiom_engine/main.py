@@ -24,6 +24,10 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
+from dotenv import load_dotenv
+
+load_dotenv()  # loads .env from the project root; no-op if file is absent
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -33,10 +37,13 @@ from slowapi.util import get_remote_address
 
 from axiom_engine.config.logging import configure_logging
 from axiom_engine.graph import build_axiom_graph
+from axiom_engine.nodes.retriever import set_search_backend
 from axiom_engine.models import (
+    AuditEvent,
     AxiomRequest,
     AxiomResponse,
     ConfidenceSummary,
+    DebugInfo,
     FinalSentence,
     TierBreakdown,
 )
@@ -192,6 +199,7 @@ def determine_status(
 def marshal_response(
     request_id: str,
     graph_result: dict[str, Any],
+    include_debug: bool = False,
 ) -> AxiomResponse:
     """
     Convert the raw GraphState dict returned by the compiled graph into
@@ -209,12 +217,26 @@ def marshal_response(
     status = determine_status(is_answerable, raw_sentences)
     confidence = compute_confidence_summary(raw_sentences)
 
+    debug: DebugInfo | None = None
+    if include_debug:
+        raw_audit = graph_result.get("audit_trail", [])
+        debug = DebugInfo(
+            audit_trail=[AuditEvent.model_validate(e) for e in raw_audit],
+            pipeline_stats={
+                "chunks_retrieved": len(graph_result.get("indexed_chunks", [])),
+                "chunks_ranked": len(graph_result.get("ranked_chunks", [])),
+                "loop_count": graph_result.get("loop_count", 0),
+                "retrieval_retry_count": graph_result.get("retrieval_retry_count", 0),
+            },
+        )
+
     return AxiomResponse(
         request_id=request_id,
         status=status,
         is_answerable=is_answerable,
         confidence_summary=confidence,
         final_response=final_sentences,
+        debug=debug,
     )
 
 
@@ -250,6 +272,19 @@ def make_error_response(
 async def lifespan(app: FastAPI):
     """Compile the graph once at startup, attach to app state."""
     configure_logging()
+
+    # Wire search backend — Tavily if key present, else MockSearchBackend.
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
+        from axiom_engine.search.tavily import TavilySearchBackend
+        set_search_backend(TavilySearchBackend(api_key=tavily_key))
+        logger.info("Search backend: Tavily (live web search enabled).")
+    else:
+        logger.warning(
+            "TAVILY_API_KEY not set — using MockSearchBackend. "
+            "Set TAVILY_API_KEY in .env for live web search."
+        )
+
     app.state.engine = build_axiom_graph()
     _metrics["started_at"] = time.monotonic()
     logger.info("Axiom Engine graph compiled and ready.")
@@ -371,7 +406,7 @@ async def synthesize(payload: AxiomRequest) -> AxiomResponse:
         _metrics["requests_error"] += 1
         return make_error_response(payload.request_id, exc)
 
-    response = marshal_response(payload.request_id, graph_result)
+    response = marshal_response(payload.request_id, graph_result, payload.include_debug)
 
     # Update metrics.
     _metrics[f"requests_{response.status}"] += 1

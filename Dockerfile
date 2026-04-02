@@ -1,12 +1,21 @@
-# ── Build stage ──────────────────────────────────────────────────────────────
+# ── Build stage ───────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
-WORKDIR /build
+# Install uv — single binary, no pip needed.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml .
+WORKDIR /app
+
+# Copy dependency manifests first so Docker can cache this layer.
+COPY pyproject.toml uv.lock ./
+
+# Install runtime dependencies into an isolated venv (no dev extras).
+# --frozen: honour uv.lock exactly; --no-install-project: deps only, not src yet.
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy source and install the project itself.
 COPY src/ ./src/
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir --prefix=/install .
+RUN uv sync --frozen --no-dev
 
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
@@ -17,15 +26,13 @@ RUN useradd --create-home --shell /bin/bash axiom
 
 WORKDIR /app
 
-# Copy installed packages from build stage.
-COPY --from=builder /install /usr/local
+# Copy the populated venv and source from the build stage.
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/src /app/src
+COPY --from=builder /app/pyproject.toml /app/pyproject.toml
 
-# Copy application source.
-COPY src/ ./src/
-COPY pyproject.toml .
-
-# Install the package itself (no deps — already installed).
-RUN pip install --no-cache-dir --no-deps -e .
+# Activate the venv by prepending it to PATH.
+ENV PATH="/app/.venv/bin:$PATH"
 
 USER axiom
 

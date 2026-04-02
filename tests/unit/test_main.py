@@ -125,9 +125,11 @@ _SAMPLE_CHUNKS = [
 
 
 @pytest.fixture()
-def client():
+def client(monkeypatch):
     # Clear the response cache before each test to prevent cross-test interference.
     _main_module._response_cache.clear()
+    # Remove TAVILY_API_KEY so the lifespan uses MockSearchBackend, not real Tavily.
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     with TestClient(app) as c:
         yield c
 
