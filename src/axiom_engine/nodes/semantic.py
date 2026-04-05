@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 from functools import partial
 from typing import Any, Literal, cast
 
@@ -49,6 +51,9 @@ from axiom_engine.utils.llm import build_completion_kwargs
 
 logger = logging.getLogger("axiom_engine.semantic")
 _audit = partial(make_audit_event, "semantic_verifier")
+
+_MAX_CONCURRENT = int(os.environ.get("AXIOM_MAX_CONCURRENT_LLM", "5"))
+_llm_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 
 # ---------------------------------------------------------------------------
 # Tier label lookup
@@ -142,7 +147,7 @@ def _parse_semantic_response(raw: str) -> dict[str, Any]:
     clean = re.sub(r"\s*```$", "", clean.strip())
 
     try:
-        data = json.loads(clean)
+        data: dict[str, Any] = json.loads(clean)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Semantic verifier response is not valid JSON: {exc}") from exc
 
@@ -230,7 +235,8 @@ def _verify_citation(
             messages=messages,
             temperature=0.0,
         )
-        response = litellm.completion(**completion_kwargs)
+        with _llm_semaphore:
+            response = litellm.completion(**completion_kwargs)
         raw: str = response.choices[0].message.content or ""
         data = _parse_semantic_response(raw)
     except Exception as exc:

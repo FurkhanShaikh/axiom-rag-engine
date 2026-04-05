@@ -24,6 +24,8 @@ from functools import partial
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from axiom_engine.state import GraphState
 from axiom_engine.utils.audit import make_audit_event
 
@@ -181,6 +183,16 @@ def set_search_backend(backend: SearchBackend) -> None:
     _search_backend = backend
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
+def _search_with_retry(query: str) -> list[dict[str, Any]]:
+    """Execute a search with exponential-backoff retry (3 attempts)."""
+    return _search_backend.search(query)
+
+
 def _safe_search(
     query: str,
 ) -> tuple[str, list[dict[str, Any]], Exception | None]:
@@ -191,7 +203,7 @@ def _safe_search(
     Returns (query, results, error_or_None).
     """
     try:
-        return query, _search_backend.search(query), None
+        return query, _search_with_retry(query), None
     except Exception as exc:
         return query, [], exc
 

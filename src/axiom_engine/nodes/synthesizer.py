@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import threading
 from functools import partial
 from typing import Any
 
@@ -30,6 +32,10 @@ from axiom_engine.utils.llm import build_completion_kwargs
 
 _audit = partial(make_audit_event, "synthesizer")
 logger = logging.getLogger("axiom_engine.synthesizer")
+
+# Concurrency limit for LLM calls — prevents overloading providers / local Ollama.
+_MAX_CONCURRENT = int(os.environ.get("AXIOM_MAX_CONCURRENT_LLM", "5"))
+_llm_semaphore = threading.Semaphore(_MAX_CONCURRENT)
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -226,7 +232,8 @@ def synthesizer_node(state: GraphState) -> dict[str, Any]:
                 messages=messages,
                 temperature=0.0,  # deterministic output for citation integrity
             )
-            response = litellm.completion(**completion_kwargs)
+            with _llm_semaphore:
+                response = litellm.completion(**completion_kwargs)
             raw_content = response.choices[0].message.content or ""
             output = _parse_llm_response(raw_content)
             break

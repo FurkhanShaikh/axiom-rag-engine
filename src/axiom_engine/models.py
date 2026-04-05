@@ -18,7 +18,7 @@ class AppConfig(BaseModel):
     """Caller-supplied behavioural constraints for the pipeline."""
 
     expertise_level: Literal["beginner", "intermediate", "expert"] = "intermediate"
-    banned_domains: list[str] = Field(default_factory=list)
+    banned_domains: list[str] = Field(default_factory=list, max_length=100)
 
 
 class ModelConfig(BaseModel):
@@ -63,8 +63,8 @@ class PipelineConfig(BaseModel):
 class AxiomRequest(BaseModel):
     """Top-level request payload from a calling application."""
 
-    request_id: str = Field(..., min_length=1)
-    user_query: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1, max_length=256)
+    user_query: str = Field(..., min_length=1, max_length=10_000)
     app_config: AppConfig = Field(default_factory=AppConfig)
     models: ModelConfig = Field(default_factory=ModelConfig)
     pipeline_config: PipelineConfig = Field(default_factory=PipelineConfig)

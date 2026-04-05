@@ -28,8 +28,10 @@ from typing import Any, Literal
 
 from cachetools import TTLCache
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -67,6 +69,30 @@ logger = logging.getLogger("axiom_engine")
 _RATE_LIMIT = os.environ.get("AXIOM_RATE_LIMIT", "20/minute")
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[_RATE_LIMIT])
+
+
+# ---------------------------------------------------------------------------
+# API key authentication
+# ---------------------------------------------------------------------------
+
+# Comma-separated valid API keys.  When empty/unset, auth is disabled
+# (backward-compatible for local development).
+_API_KEYS: set[str] = set(
+    k.strip() for k in os.environ.get("AXIOM_API_KEYS", "").split(",") if k.strip()
+)
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(
+    api_key: str | None = Security(_api_key_header),
+) -> str | None:
+    """Validate the API key if authentication is enabled."""
+    if not _API_KEYS:
+        return None  # Auth disabled — allow all requests.
+    if not api_key or api_key not in _API_KEYS:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+    return api_key
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +152,8 @@ def _cache_key(payload: AxiomRequest) -> str:
 
 def _get_cached(key: str) -> AxiomResponse | None:
     with _cache_lock:
-        return _response_cache.get(key)
+        result: AxiomResponse | None = _response_cache.get(key)
+        return result
 
 
 def _set_cached(key: str, response: AxiomResponse) -> None:
@@ -263,8 +290,13 @@ def make_error_response(
     Build a structured error response matching the AxiomResponse schema.
     Category 1 errors (architecture §7): unrecoverable system failures.
     """
-    error_message = f"{type(error).__name__}: {error}"
-    logger.error("Pipeline error for request %s: %s", request_id, error_message)
+    # Log full detail server-side; return only a generic message to the client.
+    logger.error(
+        "Pipeline error for request %s: %s: %s",
+        request_id,
+        type(error).__name__,
+        error,
+    )
 
     return AxiomResponse(
         request_id=request_id,
@@ -275,7 +307,7 @@ def make_error_response(
             tier_breakdown=TierBreakdown(),
         ),
         final_response=[],
-        error_message=error_message,
+        error_message=f"Internal pipeline error — see server logs for request {request_id}.",
     )
 
 
@@ -306,15 +338,32 @@ async def lifespan(app: FastAPI):
     _metrics["started_at"] = time.monotonic()
     logger.info("Axiom Engine graph compiled and ready.")
     yield
+    logger.info("Axiom Engine shutting down.")
 
 
 _VERSION = importlib.metadata.version("axiom-engine")
+
+# Disable interactive API docs in production (AXIOM_DOCS_ENABLED=false).
+_docs_enabled = os.environ.get("AXIOM_DOCS_ENABLED", "true").lower() == "true"
 
 app = FastAPI(
     title="Axiom Engine",
     version=_VERSION,
     description="Configuration-driven Agentic RAG with 6-tier verification.",
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+)
+
+# CORS — locked down by default; set AXIOM_CORS_ORIGINS to allow specific origins.
+_cors_origins = [
+    o.strip() for o in os.environ.get("AXIOM_CORS_ORIGINS", "").split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 app.state.limiter = limiter
@@ -342,7 +391,7 @@ async def unhandled_exception_handler(
         body = await request.json()
         request_id = body.get("request_id", "unknown")
     except Exception:
-        pass
+        logger.debug("Could not parse request body for error context")
 
     logger.exception("Unhandled exception for request %s", request_id)
     error_response = make_error_response(request_id, exc)
@@ -398,7 +447,10 @@ async def metrics() -> dict[str, Any]:
     response_model=AxiomResponse,
     summary="Run the Axiom Engine verification pipeline.",
 )
-async def synthesize(payload: AxiomRequest) -> AxiomResponse:
+async def synthesize(
+    payload: AxiomRequest,
+    _api_key: str | None = Depends(verify_api_key),
+) -> AxiomResponse:
     """
     Accept an AxiomRequest, execute the LangGraph DAG, and return
     a fully validated AxiomResponse with tier breakdown and confidence score.

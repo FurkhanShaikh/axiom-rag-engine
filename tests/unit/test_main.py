@@ -266,8 +266,8 @@ class TestMarshalResponse:
         assert resp.confidence_summary.overall_score == 0.0
         assert resp.final_response == []
         assert resp.error_message is not None
-        assert "boom" in resp.error_message
-        assert "RuntimeError" in resp.error_message
+        assert "req_err" in resp.error_message
+        assert "Internal pipeline error" in resp.error_message
 
     def test_success_response_has_no_error_message(self) -> None:
         graph_result = {
@@ -404,7 +404,8 @@ class TestErrorHandling:
         assert data["request_id"] == "req_001"
         assert data["confidence_summary"]["overall_score"] == 0.0
         assert data["error_message"] is not None
-        assert "LangGraph internal failure" in data["error_message"]
+        assert "req_001" in data["error_message"]
+        assert "Internal pipeline error" in data["error_message"]
 
     def test_error_response_is_valid_axiom_response(self, client: TestClient) -> None:
         with patch.object(app.state, "engine", create=True) as mock_engine:
