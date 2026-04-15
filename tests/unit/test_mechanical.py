@@ -129,15 +129,20 @@ class TestPassCases:
         assert result.status == "passed"
 
     def test_quote_at_end_of_chunk(self, verifier: MechanicalVerifier) -> None:
+        # Quote must meet the minimum 4-token floor to pass.
         chunk = "Python is a high-level programming language."
-        quote = "programming language."
+        quote = "Python is a high-level programming language"
         result = verifier.verify("doc_2_chunk_A", chunk, quote)
         assert result.status == "passed"
 
-    def test_single_word_quote_passes(self, verifier: MechanicalVerifier) -> None:
+    def test_short_quote_below_min_tokens_fails(self, verifier: MechanicalVerifier) -> None:
+        # C1 fix: quotes shorter than 4 normalized tokens should fail regardless
+        # of whether the tokens appear in the chunk — they are too ambiguous to
+        # serve as meaningful citations.
         chunk = "The quick brown fox jumps over the lazy dog."
         result = verifier.verify("doc_1_chunk_A", chunk, "fox")
-        assert result.status == "passed"
+        assert result.status == "failed"
+        assert "too short" in result.audit_proof["failure_reason"].lower()
 
 
 # ===========================================================================
@@ -310,8 +315,10 @@ class TestAuditProof:
         assert proof["status"] == "passed"
         assert proof["chunk_id"] == "doc_1_chunk_A"
         assert "norm_quote" in proof
-        assert "norm_chunk_length" in proof
-        assert isinstance(proof["norm_chunk_length"], int)
+        # v2.4: audit proof now records token count and sentences checked
+        # instead of the old norm_chunk_length field.
+        assert "norm_quote_tokens" in proof
+        assert isinstance(proof["norm_quote_tokens"], int)
 
     def test_fail_audit_proof_keys(self, verifier: MechanicalVerifier) -> None:
         result = verifier.verify(
@@ -328,7 +335,8 @@ class TestAuditProof:
         assert "failure_reason" in proof
         assert "raw_quote" in proof
         assert "norm_quote" in proof
-        assert "norm_chunk_snippet" in proof
+        # v2.4: renamed from norm_chunk_snippet → norm_quote_snippet
+        assert "norm_quote_snippet" in proof
 
     def test_fail_audit_proof_preserves_raw_quote(self, verifier: MechanicalVerifier) -> None:
         raw_quote = "This quote does not exist in the chunk."

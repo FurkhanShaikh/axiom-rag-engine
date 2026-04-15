@@ -172,7 +172,7 @@ class TestVerificationResult:
     def test_valid_tiers(self) -> None:
         tier_label_map = {
             1: "authoritative",
-            2: "consensus",
+            2: "multi_source",
             3: "model_assisted",
             4: "misrepresented",
             5: "hallucinated",
@@ -182,8 +182,8 @@ class TestVerificationResult:
             vr = VerificationResult(
                 tier=tier,
                 tier_label=label,
-                mechanical_check="passed",
-                semantic_check="passed",
+                mechanical_check="failed" if tier == 5 else "passed",
+                semantic_check="passed" if tier not in (4, 5) else "failed",
             )
             assert vr.tier == tier
 
@@ -256,6 +256,15 @@ class TestVerificationResult:
         with pytest.raises((ValidationError, TypeError)):
             vr.tier = 3  # type: ignore[misc]
 
+    def test_tier_5_requires_mechanical_failure(self) -> None:
+        with pytest.raises(ValidationError, match="Tier 5 requires"):
+            VerificationResult(
+                tier=5,
+                tier_label="hallucinated",
+                mechanical_check="passed",
+                semantic_check="skipped",
+            )
+
 
 # ===========================================================================
 # DraftSentence & SynthesizerOutput
@@ -285,6 +294,15 @@ class TestDraftSentence:
         with pytest.raises(ValidationError):
             DraftSentence(sentence_id="s_01", text="", is_cited=False)
 
+    def test_cited_sentence_without_citations_raises(self) -> None:
+        with pytest.raises(ValidationError, match="at least one citation"):
+            DraftSentence(
+                sentence_id="s_01",
+                text="A cited sentence missing citations.",
+                is_cited=True,
+                citations=[],
+            )
+
 
 class TestSynthesizerOutput:
     def test_unanswerable_escape_hatch(self) -> None:
@@ -307,7 +325,7 @@ class TestFinalSentence:
     def _make_verification(self, tier: int = 1) -> VerificationResult:
         label_map = {
             1: "authoritative",
-            2: "consensus",
+            2: "multi_source",
             3: "model_assisted",
             4: "misrepresented",
             5: "hallucinated",
@@ -349,6 +367,16 @@ class TestFinalSentence:
         assert fs.verification.mechanical_check == "passed"
         assert fs.verification.semantic_check == "failed"
 
+    def test_cited_final_sentence_requires_verified_citations(self) -> None:
+        with pytest.raises(ValidationError, match="verified citations"):
+            FinalSentence(
+                sentence_id="s_03",
+                text="A cited sentence missing citations.",
+                is_cited=True,
+                citations=[],
+                verification=self._make_verification(3),
+            )
+
 
 # ===========================================================================
 # AxiomResponse
@@ -359,7 +387,7 @@ class TestAxiomResponse:
     def _make_final_sentence(self, tier: int = 1) -> FinalSentence:
         label_map = {
             1: "authoritative",
-            2: "consensus",
+            2: "multi_source",
             3: "model_assisted",
             4: "misrepresented",
             5: "hallucinated",

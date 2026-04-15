@@ -1,8 +1,12 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+# Pin to a specific patch release for reproducible builds.
+# Update both FROM tags together when upgrading Python or uv.
+# Use the digest form (python:3.11.12-slim@sha256:<digest>) in production CI
+# for fully immutable image references.
+FROM python:3.11.12-slim AS builder
 
-# Install uv — single binary, no pip needed.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# Install uv — pinned version for reproducible builds.
+COPY --from=ghcr.io/astral-sh/uv:0.5.0 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -19,10 +23,12 @@ RUN uv sync --frozen --no-dev
 
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM python:3.11.12-slim
 
 # Create a non-root user for security.
-RUN useradd --create-home --shell /bin/bash axiom
+RUN useradd --create-home --shell /bin/bash axiom \
+    && apt-get update -qq && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -37,6 +43,11 @@ ENV PATH="/app/.venv/bin:$PATH"
 USER axiom
 
 EXPOSE 8000
+
+# Readiness health check — allows orchestrators to postpone traffic until the
+# graph engine is compiled and ready.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health/ready || exit 1
 
 # Uvicorn: single worker per container; scale horizontally via compose/k8s.
 CMD ["uvicorn", "axiom_engine.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

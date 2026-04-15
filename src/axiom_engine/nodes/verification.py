@@ -23,7 +23,7 @@ import logging
 from functools import partial
 from typing import Any, cast
 
-from axiom_engine.config.observability import get_tracer
+from axiom_engine.config.observability import LOOP_EXHAUSTED_TIER5, get_tracer
 from axiom_engine.models import VerificationResult
 from axiom_engine.nodes.semantic import semantic_verifier_node
 from axiom_engine.state import GraphState
@@ -48,7 +48,7 @@ def _build_tier5_rewrite_request(
     )
 
 
-def verification_node(state: GraphState) -> dict[str, Any]:
+async def verification_node(state: GraphState) -> dict[str, Any]:
     """
     LangGraph node — Unified Verification.
 
@@ -62,10 +62,10 @@ def verification_node(state: GraphState) -> dict[str, Any]:
     with tracer.start_as_current_span(
         "verification", attributes={"loop_count": state.get("loop_count", 0)}
     ):
-        return _run_verification(state)
+        return await _run_verification(state)
 
 
-def _run_verification(state: GraphState) -> dict[str, Any]:
+async def _run_verification(state: GraphState) -> dict[str, Any]:
     """Inner verification logic, wrapped by the OTel span in verification_node."""
     audit: list[dict[str, Any]] = []
     draft_sentences: list[dict] = list(state.get("draft_sentences") or [])
@@ -195,7 +195,7 @@ def _run_verification(state: GraphState) -> dict[str, Any]:
     # semantic node knows which citations to skip.
     semantic_input_state = cast(GraphState, {**state, "mechanical_results": mechanical_results})
 
-    semantic_result = semantic_verifier_node(semantic_input_state)
+    semantic_result = await semantic_verifier_node(semantic_input_state)
 
     # ------------------------------------------------------------------
     # Merge results
@@ -209,11 +209,49 @@ def _run_verification(state: GraphState) -> dict[str, Any]:
     # Merge audit trails.
     all_audit: list[dict] = audit + semantic_result.get("audit_trail", [])
 
+    # M7 fix: loop_count is incremented here (once per verification pass) rather
+    # than inside semantic_verifier_node.  The semantic node previously incremented
+    # unconditionally — including the first pass — so max_rewrite_loops=3 allowed
+    # only 2 actual rewrites.  Incrementing here keeps the counter semantically
+    # correct: it counts completed verification cycles.
+    new_loop_count = state.get("loop_count", 0) + 1
+
+    # -----------------------------------------------------------------------
+    # Loop-exhaustion guard: when ALL retry budget is consumed and unresolved
+    # Tier 5 sentences still remain, they will reach the final response verbatim.
+    # Emit a metric and an audit event so operators can alert on this condition.
+    # -----------------------------------------------------------------------
+    stages_cfg: dict = (state.get("pipeline_config") or {}).get("stages") or {}
+    max_loops: int = stages_cfg.get("max_rewrite_loops", 3)
+    max_retries: int = stages_cfg.get("max_retrieval_retries", 1)
+    retry_count: int = state.get("retrieval_retry_count", 0)
+
+    is_final_attempt = (new_loop_count >= max_loops) and (retry_count >= max_retries)
+    if is_final_attempt and pending_count > 0:
+        final_sents = semantic_result.get("final_sentences", [])
+        tier5_count = sum(
+            1
+            for s in final_sents
+            if isinstance(s.get("verification"), dict) and s["verification"].get("tier") == 5
+        )
+        if tier5_count > 0:
+            LOOP_EXHAUSTED_TIER5.inc(tier5_count)
+            all_audit.append(
+                _audit(
+                    "loop_exhausted_unresolved_tier5",
+                    {
+                        "tier5_sentence_count": tier5_count,
+                        "loop_count": new_loop_count,
+                        "retrieval_retry_count": retry_count,
+                    },
+                )
+            )
+
     return {
         "final_sentences": semantic_result.get("final_sentences", []),
         "rewrite_requests": all_rewrite_requests,
         "pending_rewrite_count": pending_count,
-        "loop_count": semantic_result.get("loop_count", state.get("loop_count", 0) + 1),
+        "loop_count": new_loop_count,
         "mechanical_results": mechanical_results,
         "audit_trail": all_audit,
     }

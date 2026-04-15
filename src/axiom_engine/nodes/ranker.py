@@ -127,26 +127,41 @@ _BM25_K1 = 1.2  # Term frequency saturation
 _BM25_B = 0.75  # Length normalization strength
 
 
-def _compute_idf(term: str, doc_token_sets: list[set[str]], n_docs: int) -> float:
-    """Compute inverse document frequency for a term across the corpus."""
-    doc_freq = sum(1 for doc_tokens in doc_token_sets if term in doc_tokens)
-    if doc_freq == 0:
-        return 0.0
-    return math.log((n_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0)
+def compute_corpus_idf(chunks: list[dict]) -> dict[str, float]:
+    """
+    Compute Robertson-Walker BM25 IDF across the retrieved chunk corpus.
+
+    IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)
+
+    where N = total chunks and df(t) = number of chunks containing term t.
+    This is always positive and approaches zero for near-universal terms,
+    providing meaningful discrimination even on small corpora (10-200 chunks).
+    """
+    n_docs = len(chunks)
+    if n_docs == 0:
+        return {}
+    df: Counter[str] = Counter()
+    for chunk in chunks:
+        tokens = set(_tokenize(chunk.get("text", "")))
+        df.update(tokens)
+    return {term: math.log((n_docs - freq + 0.5) / (freq + 0.5) + 1) for term, freq in df.items()}
 
 
 def compute_relevance_score(
     query: str,
     chunk_text: str,
-    idf_map: dict[str, float] | None = None,
     avg_doc_len: float = 1.0,
+    idf: dict[str, float] | None = None,
 ) -> float:
     """
-    Compute BM25-based relevance between a query and a chunk.
-    Returns a score in [0.0, 1.0] (normalized).
+    Compute BM25 relevance between a query and a chunk.
 
-    When idf_map is provided, uses BM25 with IDF weighting.
-    Otherwise falls back to simple term-frequency overlap.
+    When ``idf`` is supplied (corpus-level Robertson-Walker IDF), terms that
+    appear in every retrieved chunk are down-weighted relative to rare,
+    discriminating terms.  Without ``idf``, all query terms are treated
+    equally (TF-only fallback, suitable for unit tests).
+
+    Returns a score in [0.0, 1.0] (normalized against the theoretical maximum).
     """
     query_tokens = _tokenize(query)
     if not query_tokens:
@@ -160,24 +175,22 @@ def compute_relevance_score(
     doc_len = len(chunk_tokens)
 
     score = 0.0
+    max_possible = 0.0
     query_term_set = set(query_tokens)
 
     for term in query_term_set:
+        term_idf = idf.get(term, 1.0) if idf else 1.0
+        max_possible += term_idf * (_BM25_K1 + 1) / (1 + _BM25_K1)
+
         tf = chunk_tf.get(term, 0)
         if tf == 0:
             continue
 
-        idf = (idf_map or {}).get(term, 1.0)
-
         # BM25 term frequency component with length normalization.
         numerator = tf * (_BM25_K1 + 1)
         denominator = tf + _BM25_K1 * (1 - _BM25_B + _BM25_B * doc_len / max(avg_doc_len, 1.0))
-        score += idf * (numerator / denominator)
+        score += term_idf * numerator / denominator
 
-    # Normalize to [0, 1] range — divide by theoretical max (all query terms
-    # present with high TF and IDF=max_idf).
-    max_idf = max((idf_map or {}).values(), default=1.0)
-    max_possible = len(query_term_set) * max_idf * (_BM25_K1 + 1) / (1 + _BM25_K1)
     if max_possible > 0:
         score = min(1.0, score / max_possible)
 
@@ -192,9 +205,19 @@ _RELEVANCE_WEIGHT = 0.6
 _QUALITY_WEIGHT = 0.4
 
 
-def compute_ranking_score(relevance: float, quality: float) -> float:
-    """Weighted combination of relevance and quality for final ranking."""
-    return round(_RELEVANCE_WEIGHT * relevance + _QUALITY_WEIGHT * quality, 4)
+def compute_ranking_score(
+    relevance: float,
+    quality: float,
+    relevance_weight: float = _RELEVANCE_WEIGHT,
+    quality_weight: float = _QUALITY_WEIGHT,
+) -> float:
+    """Weighted combination of relevance and quality for final ranking.
+
+    Weights are configurable at call-time; defaults match the module constants.
+    Configure via ``pipeline_config.stages.relevance_weight`` and
+    ``pipeline_config.stages.quality_weight``.
+    """
+    return round(relevance_weight * relevance + quality_weight * quality, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +227,7 @@ def compute_ranking_score(relevance: float, quality: float) -> float:
 _DEFAULT_MAX_RANKED = 10
 
 
-def ranker_node(state: GraphState) -> dict[str, Any]:
+async def ranker_node(state: GraphState) -> dict[str, Any]:
     """
     LangGraph node — Relevance Ranking.
 
@@ -232,30 +255,29 @@ def ranker_node(state: GraphState) -> dict[str, Any]:
         )
     )
 
-    # Pre-compute IDF across the chunk corpus for BM25 scoring.
-    query_tokens = set(_tokenize(user_query))
-    doc_token_sets: list[set[str]] = []
-    doc_lengths: list[int] = []
+    relevance_weight = float(stages_cfg.get("relevance_weight", _RELEVANCE_WEIGHT))
+    quality_weight = float(stages_cfg.get("quality_weight", _QUALITY_WEIGHT))
 
+    doc_lengths: list[int] = []
     for chunk in scored_chunks:
         tokens = _tokenize(chunk.get("text", ""))
-        doc_token_sets.append(set(tokens))
         doc_lengths.append(len(tokens))
 
     n_docs = len(scored_chunks)
     avg_doc_len = sum(doc_lengths) / n_docs if n_docs > 0 else 1.0
-
-    idf_map: dict[str, float] = {}
-    for term in query_tokens:
-        idf_map[term] = _compute_idf(term, doc_token_sets, n_docs)
+    corpus_idf = compute_corpus_idf(scored_chunks)
 
     ranked: list[dict[str, Any]] = []
     for chunk in scored_chunks:
         text: str = chunk.get("text", "")
         quality: float = chunk.get("quality_score", 0.5)
 
-        relevance = compute_relevance_score(user_query, text, idf_map, avg_doc_len)
-        ranking_score = compute_ranking_score(relevance, quality)
+        relevance = compute_relevance_score(
+            user_query, text, avg_doc_len=avg_doc_len, idf=corpus_idf
+        )
+        ranking_score = compute_ranking_score(
+            relevance, quality, relevance_weight=relevance_weight, quality_weight=quality_weight
+        )
 
         ranked_chunk = {
             **chunk,

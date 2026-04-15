@@ -48,6 +48,20 @@ TIER_ASSIGNMENTS = Counter(
     "Verification tier assignment count",
     ["tier"],
 )
+SEMANTIC_DEGRADATIONS = Counter(
+    "axiom_semantic_degradations_total",
+    "Number of citations that fell back to deterministic Tier 3 due to LLM failure",
+)
+LOOP_EXHAUSTED_TIER5 = Counter(
+    "axiom_loop_exhausted_tier5_total",
+    "Tier 5 sentences that survived all rewrite and retrieval retries and reached the final response",
+)
+NODE_DURATION = Histogram(
+    "axiom_node_duration_seconds",
+    "Wall-clock duration of each graph node execution",
+    ["node"],
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60],
+)
 
 _prometheus_initialized = False
 
@@ -108,6 +122,56 @@ def get_tracer() -> Tracer:
 
 
 # ---------------------------------------------------------------------------
+# Prometheus label safety
+# ---------------------------------------------------------------------------
+# The ``model`` label on LLM_CALL_DURATION is user-influenced (callers can
+# override the model per-request).  Unbounded label cardinality is a Prometheus
+# footgun that can crash the metrics store.  Anything not in this set is
+# collapsed to "other".
+
+_ALLOWED_LLM_LABEL_MODELS: frozenset[str] = frozenset(
+    os.environ.get(
+        "AXIOM_ALLOWED_METRIC_MODELS",
+        ",".join(
+            [
+                # Claude 4.x family
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001",
+                # Claude 3.x / 4.5 legacy
+                "claude-sonnet-4-5",
+                "claude-opus-4-5",
+                # OpenAI
+                "gpt-4o",
+                "gpt-4o-mini",
+                "gpt-4-turbo",
+                # Local (prefix-matched below)
+                "ollama",
+            ]
+        ),
+    ).split(",")
+)
+
+_LLM_LABEL_OTHER = "other"
+
+
+def safe_model_label(model: str) -> str:
+    """
+    Return a Prometheus-safe model label.
+
+    Exact matches against the allowlist pass through unchanged.  Ollama models
+    (``ollama/<name>``) are collapsed to the prefix ``"ollama/…"`` to keep
+    cardinality bounded while remaining identifiable.  Everything else becomes
+    ``"other"``.
+    """
+    if model in _ALLOWED_LLM_LABEL_MODELS:
+        return model
+    if model.startswith("ollama/"):
+        return "ollama/…"
+    return _LLM_LABEL_OTHER
+
+
+# ---------------------------------------------------------------------------
 # Thread context propagation helper
 # ---------------------------------------------------------------------------
 
@@ -116,23 +180,31 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 def run_with_otel_context(fn: Callable[..., Any], *args: Any) -> Callable[[], Any]:
     """
-    Capture the current OTel context and return a zero-arg callable that
-    reattaches it before invoking fn(*args).
+    Capture the current OTel context **and** request-ID context var, then
+    return a zero-arg callable that reattaches both before invoking fn(*args).
 
-    Use with asyncio.to_thread() to propagate trace context across the
-    async → sync thread boundary:
+    Use with asyncio.to_thread() to propagate trace + log correlation context
+    across the async → sync thread boundary:
 
         ctx_fn = run_with_otel_context(engine.invoke, initial_state)
         result = await asyncio.to_thread(ctx_fn)
+
+    Without this, Python 3.11's asyncio.to_thread does not copy ContextVars,
+    so node loggers would lose the request ID.
     """
-    ctx = context.get_current()
+    from axiom_engine.config.logging import request_id_ctx
+
+    otel_ctx = context.get_current()
+    rid = request_id_ctx.get()
 
     @wraps(fn)
     def _wrapper() -> Any:
-        token = context.attach(ctx)
+        token = context.attach(otel_ctx)
+        rid_token = request_id_ctx.set(rid)
         try:
             return fn(*args)
         finally:
+            request_id_ctx.reset(rid_token)
             context.detach(token)
 
     return _wrapper

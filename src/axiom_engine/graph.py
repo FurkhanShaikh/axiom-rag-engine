@@ -14,17 +14,20 @@ DAG topology:
 
 from __future__ import annotations
 
-from typing import Literal
+import time
+from collections.abc import Callable
+from typing import Any, Literal, cast
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from axiom_engine.config.observability import NODE_DURATION
 from axiom_engine.nodes.ranker import ranker_node
 from axiom_engine.nodes.retriever import retriever_node
 from axiom_engine.nodes.scorer import scorer_node
 from axiom_engine.nodes.synthesizer import synthesizer_node
 from axiom_engine.nodes.verification import verification_node
-from axiom_engine.state import GraphState
+from axiom_engine.state import GraphState, reset_verification_state
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -83,18 +86,33 @@ def route_post_verification(
 # ---------------------------------------------------------------------------
 
 
-def retriever_with_retry(state: GraphState) -> dict:
+async def retriever_with_retry(state: GraphState) -> dict:
     """Wrapper that runs retriever_node and increments retrieval_retry_count."""
-    result = retriever_node(state)
+    result = await retriever_node(state)
     result["retrieval_retry_count"] = state.get("retrieval_retry_count", 0) + 1
     # Reset loop_count so the synthesizer gets fresh rewrite attempts.
     result["loop_count"] = 0
-    result["pending_rewrite_count"] = 0
-    result["rewrite_requests"] = []
-    result["draft_sentences"] = []
-    result["final_sentences"] = []
-    result["mechanical_results"] = {}
+    # Clear all stale verification state from the previous pass.
+    result.update(reset_verification_state())
     return result
+
+
+# ---------------------------------------------------------------------------
+# Node duration instrumentation
+# ---------------------------------------------------------------------------
+
+
+def _timed_node(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap an async graph node function to record wall-clock duration."""
+
+    async def _wrapper(state: GraphState) -> dict:
+        start = time.monotonic()
+        result = await fn(state)
+        NODE_DURATION.labels(node=name).observe(time.monotonic() - start)
+        return cast(dict[str, Any], result)
+
+    _wrapper.__name__ = fn.__name__
+    return _wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -110,13 +128,13 @@ def build_axiom_graph() -> CompiledStateGraph:
     """
     workflow = StateGraph(GraphState)
 
-    # Add nodes
-    workflow.add_node("retriever", retriever_node)
-    workflow.add_node("re_retriever", retriever_with_retry)
-    workflow.add_node("scorer", scorer_node)
-    workflow.add_node("ranker", ranker_node)
-    workflow.add_node("synthesizer", synthesizer_node)
-    workflow.add_node("verifier", verification_node)
+    # Add nodes (instrumented with per-node duration metrics)
+    workflow.add_node("retriever", _timed_node("retriever", retriever_node))
+    workflow.add_node("re_retriever", _timed_node("re_retriever", retriever_with_retry))
+    workflow.add_node("scorer", _timed_node("scorer", scorer_node))
+    workflow.add_node("ranker", _timed_node("ranker", ranker_node))
+    workflow.add_node("synthesizer", _timed_node("synthesizer", synthesizer_node))
+    workflow.add_node("verifier", _timed_node("verifier", verification_node))
 
     # Linear edges — full pipeline
     workflow.set_entry_point("retriever")

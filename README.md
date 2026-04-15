@@ -2,9 +2,10 @@
 
 **Configuration-driven Agentic RAG with 6-tier verification.**
 
-Axiom Engine is a research-grade retrieval-augmented generation (RAG) system that
-verifies every citation before presenting answers. It assigns each claim a confidence
-tier (1–6), ensuring users know exactly how trustworthy each piece of information is.
+Axiom Engine is a retrieval-augmented generation (RAG) system that
+verifies every cited claim before presenting answers. It assigns each claim a confidence
+tier (1–6), but Tier 6 is currently reserved and not produced until explicit
+contradiction detection ships.
 
 ## Quick Start
 
@@ -38,11 +39,11 @@ retriever → scorer → ranker → synthesizer → verifier ─┐
 | Tier | Label | Meaning |
 |---|---|---|
 | 1 | Authoritative | Verified against official/primary source |
-| 2 | Consensus | Verified against multiple agreeing sources |
+| 2 | Multi-Source | Verified against multiple independent domains; agreement is not yet proven |
 | 3 | Model Assisted | Mechanically verified; semantic relied on model knowledge |
 | 4 | Misrepresented | Quote exists but claim distorts context |
 | 5 | Hallucinated | Quote not found in source chunk |
-| 6 | Conflicted | Sources contradict each other |
+| 6 | Conflicted | Reserved for future contradiction detection; not currently assigned |
 
 ## Development
 

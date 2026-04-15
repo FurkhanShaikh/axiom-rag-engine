@@ -13,12 +13,13 @@ from __future__ import annotations
 import json
 from collections import deque
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from axiom_engine.graph import build_axiom_graph, route_post_verification
 from axiom_engine.nodes.retriever import MockSearchBackend, set_search_backend
+from axiom_engine.nodes.verification import verification_node
 from axiom_engine.state import make_initial_state
 
 # Synthesizer and Semantic models used in tests — must match _base_state.
@@ -44,9 +45,9 @@ def _mock_litellm_response(content: str) -> MagicMock:
 def _make_model_router(
     synth_responses: list[str],
     semantic_responses: list[str],
-) -> MagicMock:
+) -> AsyncMock:
     """
-    Returns a side_effect callable that routes litellm.completion calls
+    Returns an async side_effect callable that routes litellm.acompletion calls
     based on the `model` kwarg. This avoids the module-singleton patch
     collision where nodes.synthesizer.litellm and nodes.semantic.litellm
     are the same object.
@@ -54,7 +55,7 @@ def _make_model_router(
     synth_q: deque[str] = deque(synth_responses)
     semantic_q: deque[str] = deque(semantic_responses)
 
-    def _router(*args: Any, **kwargs: Any) -> MagicMock:
+    async def _router(*args: Any, **kwargs: Any) -> MagicMock:
         model = kwargs.get("model") or (args[0] if args else "")
         if model == _SYNTH_MODEL:
             if not synth_q:
@@ -65,7 +66,7 @@ def _make_model_router(
                 raise RuntimeError("Unexpected extra semantic call")
             return _mock_litellm_response(semantic_q.popleft())
         else:
-            raise RuntimeError(f"Unexpected model in litellm.completion: {model!r}")
+            raise RuntimeError(f"Unexpected model in litellm.acompletion: {model!r}")
 
     return _router
 
@@ -98,14 +99,15 @@ _SAMPLE_CHUNKS = [
             "Solid-state batteries replace liquid electrolytes with solid ceramics. "
             "This substitution significantly improves thermal stability and energy density."
         ),
-        "source_url": "https://science.org/article",
-        "domain": "science.org",
+        # Use a primary-source domain so Tier 1 is reachable in tier-assignment tests.
+        "source_url": "https://nih.gov/article",
+        "domain": "nih.gov",
     },
 ]
 
 _SEARCH_RESULTS = [
     {
-        "url": "https://science.org/article",
+        "url": "https://nih.gov/article",
         "content": _SAMPLE_CHUNKS[0]["text"],
         "title": "Solid-State Battery Review",
     }
@@ -203,7 +205,7 @@ class TestEndToEndLoop:
       - The escape hatch terminates early.
       - Loop exhaustion terminates after max_rewrite_loops.
 
-    All tests use a single @patch("litellm.completion") with a model-based
+    All tests use a single @patch("litellm.acompletion") with a model-based
     router, because nodes.synthesizer.litellm and nodes.semantic.litellm
     are the same module-singleton — dual patching causes one to overwrite
     the other.
@@ -216,8 +218,8 @@ class TestEndToEndLoop:
         yield
         set_search_backend(MockSearchBackend())
 
-    @patch("litellm.completion")
-    def test_happy_path_single_pass(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_happy_path_single_pass(self, mock_llm: AsyncMock) -> None:
         """Correct verbatim quote → mechanical pass → semantic pass → END."""
         set_search_backend(MockSearchBackend(_SEARCH_RESULTS))
         synth_json = json.dumps(
@@ -251,15 +253,15 @@ class TestEndToEndLoop:
         mock_llm.side_effect = _make_model_router([synth_json], [semantic_json])
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         assert result["is_answerable"] is True
         assert len(result["final_sentences"]) == 1
         assert result["final_sentences"][0]["verification"]["tier"] == 1
         assert result["loop_count"] == 1
 
-    @patch("litellm.completion")
-    def test_hallucination_triggers_rewrite_loop(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_hallucination_triggers_rewrite_loop(self, mock_llm: AsyncMock) -> None:
         """
         Pass 1: Fabricated quote → Mechanical Tier 5 → loops back.
         Pass 2: Corrected verbatim quote → passes → END.
@@ -318,15 +320,15 @@ class TestEndToEndLoop:
         )
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         assert result["is_answerable"] is True
         assert len(result["final_sentences"]) == 1
         assert result["final_sentences"][0]["verification"]["tier"] == 1
         assert result["loop_count"] == 2
 
-    @patch("litellm.completion")
-    def test_escape_hatch_terminates_immediately(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_escape_hatch_terminates_immediately(self, mock_llm: AsyncMock) -> None:
         """is_answerable=false → END without entering verification."""
         set_search_backend(MockSearchBackend(_SEARCH_RESULTS))
         unanswerable_json = json.dumps(
@@ -338,13 +340,13 @@ class TestEndToEndLoop:
         mock_llm.side_effect = _make_model_router([unanswerable_json], [])
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         assert result["is_answerable"] is False
         assert result.get("final_sentences", []) == [] or result["final_sentences"] == []
 
-    @patch("litellm.completion")
-    def test_loop_exhaustion_terminates_after_max_loops(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_loop_exhaustion_terminates_after_max_loops(self, mock_llm: AsyncMock) -> None:
         """
         Synthesizer keeps hallucinating. After 3 loops the graph terminates.
         """
@@ -377,13 +379,13 @@ class TestEndToEndLoop:
         graph = build_axiom_graph()
         # Set retrieval_retry_count=1 so re-retrieve is exhausted; we're testing
         # rewrite loop exhaustion specifically, not re-retrieve.
-        result = graph.invoke(_base_state(retrieval_retry_count=1))
+        result = await graph.ainvoke(_base_state(retrieval_retry_count=1))
 
         assert result["loop_count"] == 3
         assert result["final_sentences"][0]["verification"]["tier"] == 5
 
-    @patch("litellm.completion")
-    def test_tier_4_semantic_failure_triggers_rewrite(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_tier_4_semantic_failure_triggers_rewrite(self, mock_llm: AsyncMock) -> None:
         """
         Mechanical passes but semantic finds misrepresentation (Tier 4).
         Graph loops back for a rewrite, second pass succeeds.
@@ -451,13 +453,13 @@ class TestEndToEndLoop:
         )
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         assert result["is_answerable"] is True
         assert result["final_sentences"][0]["verification"]["tier"] == 1
 
-    @patch("litellm.completion")
-    def test_audit_trail_accumulates_across_loops(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_audit_trail_accumulates_across_loops(self, mock_llm: AsyncMock) -> None:
         """The audit_trail must accumulate events from every pass, never overwrite."""
         set_search_backend(MockSearchBackend(_SEARCH_RESULTS))
         hallucinated_json = json.dumps(
@@ -513,7 +515,7 @@ class TestEndToEndLoop:
         )
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         trail = result.get("audit_trail", [])
         assert len(trail) > 0
@@ -534,8 +536,8 @@ class TestFullPipelineIntegration:
     Verifies the complete DAG wiring and audit trail accumulation.
     """
 
-    @patch("litellm.completion")
-    def test_full_pipeline_from_retriever_to_end(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_full_pipeline_from_retriever_to_end(self, mock_llm: AsyncMock) -> None:
         """Mock search → retriever → scorer → ranker → synth → verify → END."""
         from axiom_engine.nodes.retriever import MockSearchBackend, set_search_backend
 
@@ -544,7 +546,9 @@ class TestFullPipelineIntegration:
             MockSearchBackend(
                 [
                     {
-                        "url": "https://arxiv.org/batteries",
+                        # Use a primary-source domain so this test verifies Tier 1
+                        # assignment end-to-end through the full pipeline.
+                        "url": "https://nih.gov/batteries",
                         "content": (
                             "Solid-state batteries replace liquid electrolytes with solid ceramics. "
                             "This substitution significantly improves thermal stability and energy density."
@@ -588,7 +592,7 @@ class TestFullPipelineIntegration:
         graph = build_axiom_graph()
         # Start from a clean state — no pre-injected chunks.
         state = _base_state()
-        result = graph.invoke(state)
+        result = await graph.ainvoke(state)
 
         assert result["is_answerable"] is True
         assert len(result["final_sentences"]) == 1
@@ -603,8 +607,8 @@ class TestFullPipelineIntegration:
         assert "synthesizer" in nodes_in_trail
         assert "verifier" in nodes_in_trail
 
-    @patch("litellm.completion")
-    def test_full_pipeline_with_banned_domain(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_full_pipeline_with_banned_domain(self, mock_llm: AsyncMock) -> None:
         """Banned domain results are filtered before reaching the synthesizer."""
         from axiom_engine.nodes.retriever import MockSearchBackend, set_search_backend
 
@@ -665,7 +669,7 @@ class TestFullPipelineIntegration:
                 "expertise_level": "intermediate",
             },
         )
-        result = graph.invoke(state)
+        result = await graph.ainvoke(state)
 
         # The spam.com chunk should have been filtered out.
         banned_events = [
@@ -673,8 +677,10 @@ class TestFullPipelineIntegration:
         ]
         assert len(banned_events) >= 1
 
-    @patch("litellm.completion")
-    def test_full_pipeline_empty_search_results_unanswerable(self, mock_llm: MagicMock) -> None:
+    @patch("litellm.acompletion", new_callable=AsyncMock)
+    async def test_full_pipeline_empty_search_results_unanswerable(
+        self, mock_llm: AsyncMock
+    ) -> None:
         """No search results → no chunks → synthesizer says unanswerable."""
         from axiom_engine.nodes.retriever import MockSearchBackend, set_search_backend
 
@@ -689,6 +695,70 @@ class TestFullPipelineIntegration:
         mock_llm.side_effect = _make_model_router([unanswerable_json], [])
 
         graph = build_axiom_graph()
-        result = graph.invoke(_base_state())
+        result = await graph.ainvoke(_base_state())
 
         assert result["is_answerable"] is False
+
+
+# ===========================================================================
+# D. Loop-exhaustion monitoring
+# ===========================================================================
+
+
+class TestLoopExhaustionMonitoring:
+    async def test_tier5_audit_event_emitted_on_loop_exhaustion(self) -> None:
+        """verification_node emits loop_exhausted_unresolved_tier5 when all budget is spent."""
+        # last possible iteration: loop_count = max_loops-1, retry_count = max_retries
+        state = _base_state(loop_count=2, retrieval_retry_count=1)
+        state["pipeline_config"]["stages"]["max_rewrite_loops"] = 3
+        state["pipeline_config"]["stages"]["max_retrieval_retries"] = 1
+        # Citation pointing to a non-existent chunk → mechanical Tier 5 failure.
+        # indexed_chunks is empty (default), so the chunk lookup will miss.
+        state["draft_sentences"] = [
+            {
+                "sentence_id": "s_01",
+                "text": "Solid-state batteries are 100% efficient.",
+                "is_cited": True,
+                "citations": [
+                    {
+                        "citation_id": "cite_1",
+                        "chunk_id": "doc_1_chunk_A",
+                        "exact_source_quote": "Solid-state batteries are 100% efficient.",
+                    }
+                ],
+            }
+        ]
+        state["mechanical_results"] = {}
+
+        result = await verification_node(state)
+
+        event_types = [e["event_type"] for e in result["audit_trail"]]
+        assert "loop_exhausted_unresolved_tier5" in event_types
+
+    async def test_no_exhaustion_event_when_retries_remain(self) -> None:
+        """No audit event emitted when retrieval retries are still available."""
+        state = _base_state(loop_count=2, retrieval_retry_count=0)
+        state["pipeline_config"]["stages"]["max_rewrite_loops"] = 3
+        state["pipeline_config"]["stages"]["max_retrieval_retries"] = 1
+        # Same mechanical failure setup — but retry_count=0 < max_retries=1, so
+        # is_final_attempt is False and the exhaustion event must not fire.
+        state["draft_sentences"] = [
+            {
+                "sentence_id": "s_01",
+                "text": "Solid-state batteries are 100% efficient.",
+                "is_cited": True,
+                "citations": [
+                    {
+                        "citation_id": "cite_1",
+                        "chunk_id": "doc_1_chunk_A",
+                        "exact_source_quote": "Solid-state batteries are 100% efficient.",
+                    }
+                ],
+            }
+        ]
+        state["mechanical_results"] = {}
+
+        result = await verification_node(state)
+
+        event_types = [e["event_type"] for e in result["audit_trail"]]
+        assert "loop_exhausted_unresolved_tier5" not in event_types

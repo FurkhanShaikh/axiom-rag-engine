@@ -5,9 +5,10 @@ All I/O contracts for the API Gateway and the LangGraph DAG.
 
 from __future__ import annotations
 
+import os as _os
 from typing import Literal
 
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 # ---------------------------------------------------------------------------
 # INPUT MODELS
@@ -21,17 +22,31 @@ class AppConfig(BaseModel):
     banned_domains: list[str] = Field(default_factory=list, max_length=100)
     authoritative_domains: list[str] = Field(default_factory=list, max_length=100)
     low_quality_domains: list[str] = Field(default_factory=list, max_length=100)
+    exclude_default_domains: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description=(
+            "Domains to remove from the built-in authoritative/low-quality default sets. "
+            "Use this to demote sources such as 'en.wikipedia.org' from the defaults."
+        ),
+    )
+
+
+# L6: Allow operators to configure default models via environment variables so
+# model identifiers don't need to change in code when providers deprecate aliases.
+_DEFAULT_SYNTHESIZER_MODEL = _os.environ.get("AXIOM_DEFAULT_SYNTHESIZER_MODEL", "claude-sonnet-4-5")
+_DEFAULT_VERIFIER_MODEL = _os.environ.get("AXIOM_DEFAULT_VERIFIER_MODEL", "gpt-4o-mini")
 
 
 class ModelConfig(BaseModel):
     """LiteLLM model identifiers for each pipeline stage."""
 
     synthesizer: str = Field(
-        default="claude-3-5-sonnet-20241022",
+        default_factory=lambda: _DEFAULT_SYNTHESIZER_MODEL,
         description="Heavy model used for answer generation.",
     )
     verifier: str = Field(
-        default="gpt-4o-mini",
+        default_factory=lambda: _DEFAULT_VERIFIER_MODEL,
         description="Lightweight model used for semantic verification.",
     )
 
@@ -93,6 +108,7 @@ class Citation(BaseModel):
     exact_source_quote: str = Field(
         ...,
         min_length=1,
+        max_length=2_000,
         description="Verbatim substring of the source chunk. No paraphrasing allowed.",
     )
 
@@ -104,6 +120,14 @@ class DraftSentence(BaseModel):
     text: str = Field(..., min_length=1)
     is_cited: bool
     citations: list[Citation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_citation_shape(self) -> DraftSentence:
+        if self.is_cited and not self.citations:
+            raise ValueError("Cited draft sentences must include at least one citation.")
+        if not self.is_cited and self.citations:
+            raise ValueError("Uncited draft sentences must not include citations.")
+        return self
 
 
 class SynthesizerOutput(BaseModel):
@@ -124,12 +148,19 @@ class SynthesizerOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Verification tier semantics (doc §4):
-#   1 Authoritative  — mechanical + semantic pass vs. official source
-#   2 Consensus      — mechanical + semantic pass vs. multiple agreeing sources
-#   3 Model Assisted — mechanical pass; semantic uses model training knowledge
-#   4 Misrepresented — mechanical pass; semantic fail (context stripped/inverted)
-#   5 Hallucinated   — mechanical fail (quote does not exist in chunk)
-#   6 Conflicted     — mechanical + semantic pass; sources contradict each other
+#   1 Authoritative  — mechanical + semantic pass; source is a primary official document
+#                      (government body, official spec, platform docs).
+#                      Tertiary sources (Wikipedia, arXiv) cannot reach Tier 1.
+#   2 Consensus      — mechanical + semantic pass; citations span ≥2 distinct domains.
+#                      NOTE: this is multi-domain coverage, NOT an agreement check.
+#                      Pairwise NLI / contradiction detection is not yet implemented;
+#                      Tier 2 should be read as "multi-source" until that ships.
+#   3 Model Assisted — mechanical pass; semantic check passed or disabled.
+#   4 Misrepresented — mechanical pass; semantic fail (context stripped/inverted).
+#   5 Hallucinated   — mechanical fail (quote does not exist in any source sentence).
+#   6 Conflicted     — NOT YET IMPLEMENTED. Requires pairwise NLI contradiction
+#                      detection across citation pairs. Reserved for future use;
+#                      the verifier will never currently assign this tier.
 
 VerificationTier = Literal[1, 2, 3, 4, 5, 6]
 
@@ -143,7 +174,8 @@ class VerificationResult(BaseModel):
     )
     tier_label: Literal[
         "authoritative",
-        "consensus",
+        "consensus",  # Deprecated — use "multi_source" for new code.
+        "multi_source",
         "model_assisted",
         "misrepresented",
         "hallucinated",
@@ -154,6 +186,22 @@ class VerificationResult(BaseModel):
     failure_reason: str | None = None
 
     model_config = {"frozen": True}
+
+    @model_validator(mode="after")
+    def validate_tier_contract(self) -> VerificationResult:
+        if self.tier == 5 and self.mechanical_check != "failed":
+            raise ValueError("Tier 5 requires mechanical_check='failed'.")
+        if self.tier == 4 and (
+            self.mechanical_check != "passed" or self.semantic_check != "failed"
+        ):
+            raise ValueError("Tier 4 requires mechanical pass and semantic failure.")
+        if self.tier in (1, 2) and (
+            self.mechanical_check != "passed" or self.semantic_check != "passed"
+        ):
+            raise ValueError("Tier 1 and Tier 2 require both checks to pass.")
+        if self.tier == 6 and self.semantic_check == "skipped":
+            raise ValueError("Tier 6 requires an explicit contradiction verdict.")
+        return self
 
 
 class VerifiedCitation(Citation):
@@ -170,6 +218,14 @@ class FinalSentence(BaseModel):
     is_cited: bool
     citations: list[VerifiedCitation] = Field(default_factory=list)
     verification: VerificationResult
+
+    @model_validator(mode="after")
+    def validate_final_citation_shape(self) -> FinalSentence:
+        if self.is_cited and not self.citations:
+            raise ValueError("Cited final sentences must include verified citations.")
+        if not self.is_cited and self.citations:
+            raise ValueError("Uncited final sentences must not include citations.")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +245,21 @@ class TierBreakdown(BaseModel):
 class ConfidenceSummary(BaseModel):
     overall_score: float = Field(..., ge=0.0, le=1.0)
     tier_breakdown: TierBreakdown
+
+
+# ---------------------------------------------------------------------------
+# AUDIT TRAIL MODELS
+# ---------------------------------------------------------------------------
+
+
+class AuditEvent(BaseModel):
+    """A single immutable record emitted by any node into the audit trail."""
+
+    event_id: str
+    node: str = Field(..., description="Name of the emitting LangGraph node.")
+    event_type: str
+    payload: dict = Field(default_factory=dict)
+    timestamp_utc: str = Field(..., description="ISO-8601 UTC timestamp at emission time.")
 
 
 class DebugInfo(BaseModel):
@@ -214,18 +285,3 @@ class AxiomResponse(BaseModel):
         default=None,
         description="Full audit trail and pipeline stats. Populated only when include_debug=true.",
     )
-
-
-# ---------------------------------------------------------------------------
-# AUDIT TRAIL MODELS
-# ---------------------------------------------------------------------------
-
-
-class AuditEvent(BaseModel):
-    """A single immutable record emitted by any node into the audit trail."""
-
-    event_id: str
-    node: str = Field(..., description="Name of the emitting LangGraph node.")
-    event_type: str
-    payload: dict = Field(default_factory=dict)
-    timestamp_utc: str = Field(..., description="ISO-8601 UTC timestamp at emission time.")

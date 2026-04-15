@@ -29,28 +29,49 @@ logger = logging.getLogger("axiom_engine.scorer")
 
 # ---------------------------------------------------------------------------
 # Source quality — built-in defaults (overridable via app_config)
+#
+# TIER TAXONOMY note (C4 fix):
+#   _DEFAULT_PRIMARY_DOMAINS  — official / primary sources.  Citations from
+#       these domains are eligible for Tier 1 ("Authoritative").  Tertiary
+#       sources such as Wikipedia must NOT appear here.
+#   _DEFAULT_REFERENCE_DOMAINS — academic papers, encyclopedias, and curated
+#       reference works.  These are high-quality but not "official primary
+#       sources"; they cap out at Tier 2 ("Consensus") or Tier 3.
+#   _DEFAULT_AUTHORITATIVE_DOMAINS — union of the two sets above; used by the
+#       scorer for the quality score (both tiers receive 0.9 quality boost).
 # ---------------------------------------------------------------------------
 
-_DEFAULT_AUTHORITATIVE_DOMAINS: set[str] = {
-    # Academic / government
+_DEFAULT_PRIMARY_DOMAINS: set[str] = {
+    # Official government / intergovernmental health bodies
+    "nih.gov",
+    "cdc.gov",
+    "who.int",
+    "europa.eu",
+    # Official standards and specifications
+    "w3.org",
+    "ietf.org",
+    "rfc-editor.org",
+    # Official language / platform documentation
+    "docs.python.org",
+    "developer.mozilla.org",
+}
+
+_DEFAULT_REFERENCE_DOMAINS: set[str] = {
+    # Peer-reviewed academic publishers / preprint servers
     "arxiv.org",
-    "scholar.google.com",
     "pubmed.ncbi.nlm.nih.gov",
     "nature.com",
     "science.org",
     "ieee.org",
     "acm.org",
-    "nih.gov",
-    "cdc.gov",
-    "who.int",
-    "europa.eu",
-    # Reference
+    "scholar.google.com",
+    # Curated encyclopedic reference (tertiary — NOT primary)
     "en.wikipedia.org",
     "britannica.com",
-    # Major tech docs
-    "docs.python.org",
-    "developer.mozilla.org",
 }
+
+# Union used for source quality scoring — both sets receive the high-authority boost.
+_DEFAULT_AUTHORITATIVE_DOMAINS: set[str] = _DEFAULT_PRIMARY_DOMAINS | _DEFAULT_REFERENCE_DOMAINS
 
 _DEFAULT_LOW_QUALITY_DOMAINS: set[str] = {
     "reddit.com",
@@ -67,25 +88,74 @@ def build_domain_sets(
     app_config: dict[str, Any],
 ) -> tuple[set[str], set[str]]:
     """
-    Build authoritative and low-quality domain sets.
-    Uses app_config overrides if present, otherwise falls back to defaults.
-    """
-    authoritative = set(app_config.get("authoritative_domains", []))
-    low_quality = set(app_config.get("low_quality_domains", []))
+    Build authoritative and low-quality domain sets from app_config.
 
-    # Merge with defaults (config additions are additive).
-    authoritative = authoritative | _DEFAULT_AUTHORITATIVE_DOMAINS
-    low_quality = low_quality | _DEFAULT_LOW_QUALITY_DOMAINS
+    Config keys:
+      authoritative_domains  — added on top of defaults (additive).
+      low_quality_domains    — added on top of defaults (additive).
+      exclude_default_domains — list of domain strings to remove from the
+          built-in default sets (allows callers to demote e.g. Wikipedia).
+
+    Returns:
+        (authoritative_set, low_quality_set)
+    """
+    caller_authoritative = set(app_config.get("authoritative_domains", []))
+    caller_low_quality = set(app_config.get("low_quality_domains", []))
+    excluded = {d.lower().strip() for d in app_config.get("exclude_default_domains", [])}
+
+    authoritative = (_DEFAULT_AUTHORITATIVE_DOMAINS - excluded) | caller_authoritative
+    low_quality = (_DEFAULT_LOW_QUALITY_DOMAINS - excluded) | caller_low_quality
 
     return authoritative, low_quality
 
 
+def build_primary_domain_set(app_config: dict[str, Any]) -> set[str]:
+    """
+    Build the *primary* domain set — sources eligible for Tier 1
+    ("Authoritative").  Reference/encyclopedic domains are excluded.
+
+    Caller-supplied authoritative_domains are treated as primary unless
+    they appear in exclude_default_domains.
+    """
+    excluded = {d.lower().strip() for d in app_config.get("exclude_default_domains", [])}
+    caller_primary = set(app_config.get("authoritative_domains", []))
+    return (_DEFAULT_PRIMARY_DOMAINS - excluded) | caller_primary
+
+
+def _normalize_domain(domain: str) -> str:
+    """
+    Canonical domain normalization: lowercase, strip, and decode punycode
+    (ACE/xn--) labels to their Unicode equivalents.
+
+    This prevents lookalike-domain bypasses where an attacker uses a punycode
+    variant of an authoritative domain (e.g. ``xn--googl-dua.com``) to pass
+    through domain-authority checks unchanged.
+    """
+    domain = domain.lower().strip()
+    parts = domain.split(".")
+    normalized: list[str] = []
+    for part in parts:
+        if part.startswith("xn--"):
+            try:
+                normalized.append(part.encode("ascii").decode("idna"))
+            except (UnicodeError, UnicodeDecodeError):
+                normalized.append(part)
+        else:
+            normalized.append(part)
+    return ".".join(normalized)
+
+
 def is_authoritative_domain(domain: str, authoritative: set[str]) -> bool:
-    """Return True when the domain is authoritative or a subdomain of one."""
-    domain_lower = domain.lower().strip()
-    if domain_lower in authoritative:
+    """Return True when the domain is in the authoritative set or a subdomain of one."""
+    domain_norm = _normalize_domain(domain)
+    if domain_norm in authoritative:
         return True
-    return any(domain_lower.endswith("." + auth) for auth in authoritative)
+    return any(domain_norm.endswith("." + auth) for auth in authoritative)
+
+
+def is_primary_domain(domain: str, primary: set[str]) -> bool:
+    """Return True when the domain is a primary (Tier-1-eligible) source."""
+    return is_authoritative_domain(domain, primary)
 
 
 def score_source_quality(
@@ -95,26 +165,30 @@ def score_source_quality(
 ) -> float:
     """
     Score a domain's authority on a 0.0–1.0 scale.
-      - Authoritative → 0.9
-      - Low quality    → 0.3
-      - Unknown        → 0.5
+      - Authoritative (primary or reference) → 0.9
+      - Low quality                          → 0.3
+      - Unknown                              → 0.5
+
+    Domain matching is punycode/IDN-aware: ACE labels (``xn--…``) are decoded
+    to Unicode before comparison so lookalike domains cannot bypass authority
+    checks.
     """
     if authoritative is None:
         authoritative = _DEFAULT_AUTHORITATIVE_DOMAINS
     if low_quality is None:
         low_quality = _DEFAULT_LOW_QUALITY_DOMAINS
 
-    domain_lower = domain.lower().strip()
-    if domain_lower in authoritative:
+    domain_norm = _normalize_domain(domain)
+    if domain_norm in authoritative:
         return 0.9
-    if domain_lower in low_quality:
+    if domain_norm in low_quality:
         return 0.3
-    # Check if domain is a subdomain of an authoritative domain.
+    # Check subdomain membership.
     for auth in authoritative:
-        if domain_lower.endswith("." + auth):
+        if domain_norm.endswith("." + auth):
             return 0.85
     for low in low_quality:
-        if domain_lower.endswith("." + low):
+        if domain_norm.endswith("." + low):
             return 0.3
     return _DEFAULT_SOURCE_SCORE
 
@@ -164,9 +238,18 @@ _SOURCE_WEIGHT = 0.4
 _CHUNK_WEIGHT = 0.6
 
 
-def compute_combined_score(source_score: float, chunk_score: float) -> float:
-    """Weighted combination of source and chunk quality scores."""
-    return round(_SOURCE_WEIGHT * source_score + _CHUNK_WEIGHT * chunk_score, 4)
+def compute_combined_score(
+    source_score: float,
+    chunk_score: float,
+    source_weight: float = _SOURCE_WEIGHT,
+    chunk_weight: float = _CHUNK_WEIGHT,
+) -> float:
+    """Weighted combination of source and chunk quality scores.
+
+    Weights are configurable at call-time; defaults match the module constants.
+    Configure via ``app_config.source_weight`` and ``app_config.chunk_weight``.
+    """
+    return round(source_weight * source_score + chunk_weight * chunk_score, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +257,7 @@ def compute_combined_score(source_score: float, chunk_score: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def scorer_node(state: GraphState) -> dict[str, Any]:
+async def scorer_node(state: GraphState) -> dict[str, Any]:
     """
     LangGraph node — Source & Chunk Quality Scoring.
 
@@ -191,6 +274,8 @@ def scorer_node(state: GraphState) -> dict[str, Any]:
     app_cfg: dict = state.get("app_config") or {}
 
     authoritative, low_quality = build_domain_sets(app_cfg)
+    source_weight = float(app_cfg.get("source_weight", _SOURCE_WEIGHT))
+    chunk_weight = float(app_cfg.get("chunk_weight", _CHUNK_WEIGHT))
 
     audit.append(
         _audit(
@@ -208,7 +293,7 @@ def scorer_node(state: GraphState) -> dict[str, Any]:
 
         source_score = score_source_quality(domain, authoritative, low_quality)
         chunk_score = score_chunk_quality(text)
-        combined = compute_combined_score(source_score, chunk_score)
+        combined = compute_combined_score(source_score, chunk_score, source_weight, chunk_weight)
 
         if combined < _MIN_QUALITY_THRESHOLD:
             filtered_count += 1

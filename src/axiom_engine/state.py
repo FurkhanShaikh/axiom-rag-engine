@@ -38,6 +38,8 @@ class GraphState(TypedDict):
     indexed_chunks: list[dict]
     # Monotonic doc counter so chunk IDs stay unique across retrieval retries.
     next_doc_index: int
+    # Appended-to list of URLs across all retries to prevent duplicate fetching.
+    past_seen_urls: Annotated[Sequence[str], operator.add]
 
     # ------------------------------------------------------------------
     # SCORING & RANKING STATE
@@ -99,6 +101,7 @@ def make_initial_state(
         search_queries=[],
         indexed_chunks=[],
         next_doc_index=1,
+        past_seen_urls=[],
         scored_chunks=[],
         ranked_chunks=[],
         is_answerable=True,
@@ -111,3 +114,22 @@ def make_initial_state(
         final_sentences=[],
         audit_trail=[],
     )
+
+
+def reset_verification_state() -> dict:
+    """Return the canonical reset dict for verification-related fields.
+
+    Used by ``retriever_with_retry`` (graph.py) to clear stale verification
+    state before a fresh retrieval pass.  Centralising this here ensures
+    that new verification fields are reset in one place rather than being
+    scattered across multiple call sites.
+    """
+    return {
+        "draft_sentences": [],
+        "final_sentences": [],
+        "mechanical_results": {},
+        "rewrite_requests": [],
+        "pending_rewrite_count": 0,
+        "scored_chunks": [],
+        "ranked_chunks": [],
+    }

@@ -3,19 +3,18 @@ Axiom Engine v2.3 — Mechanical Verifier (Stage 1, Non-Negotiable Floor)
 
 Deterministic citation integrity checker. No LLM involved.
 
-Algorithm (v2.3 Normalized String Matching):
-  1. Normalize both the chunk text and the LLM-supplied quote:
+Algorithm:
+  1. Normalize both the full chunk and the LLM-supplied quote:
        - Expand/replace Unicode punctuation and smart quotes to ASCII equivalents
        - Lowercase
        - Strip all remaining punctuation
        - Collapse all whitespace to a single space and strip edges
-  2. Check whether the normalized quote is a substring of the normalized chunk.
-  3. If YES  → passed  (tier=None, citation is intact)
-     If NO   → failed  (tier=5, Hallucinated Citation — triggers Synthesizer rewrite)
-
-The normalization step is the v2.3 patch that prevents LLM tokenization artifacts
-(smart quotes, non-breaking spaces, en-dashes, etc.) from causing false-positive
-Tier 5 failures on quotes that are genuinely present in the source chunk.
+  2. Require the normalized quote to have at least _MIN_NORMALIZED_TOKENS
+     significant tokens (post-normalization word count). Short fragments like
+     "the sky" match too liberally and provide no citation integrity guarantee.
+  3. Check whether the normalized quote is a substring of the normalized chunk.
+  4. If YES → passed
+     If NO  → failed  (tier=5, Hallucinated Citation)
 """
 
 from __future__ import annotations
@@ -25,6 +24,12 @@ import string
 import unicodedata
 from dataclasses import dataclass
 from typing import Literal
+
+# ---------------------------------------------------------------------------
+# Minimum quote length (in normalized tokens) to accept a "passed" verdict.
+# A quote normalized to fewer tokens is too short to meaningfully verify.
+# ---------------------------------------------------------------------------
+_MIN_NORMALIZED_TOKENS = 4
 
 # ---------------------------------------------------------------------------
 # Unicode → ASCII mapping for common LLM tokenization artifacts
@@ -75,7 +80,8 @@ class MechanicalVerificationResult:
     Immutable result returned by MechanicalVerifier.verify().
 
     Attributes:
-        status:      "passed" if the quote exists in the chunk; "failed" otherwise.
+        status:      "passed" if the quote exists within a single source
+                     sentence; "failed" otherwise.
         tier:        None on pass. 5 (Hallucinated) on failure.
         audit_proof: Dict suitable for direct insertion into the audit_trail state.
     """
@@ -110,10 +116,14 @@ class MechanicalVerifier:
         llm_quote: str,
     ) -> MechanicalVerificationResult:
         """
-        Verify that `llm_quote` genuinely exists inside `chunk_text`.
+        Verify that `llm_quote` genuinely exists inside the `chunk_text`.
+        Allows multi-sentence quoting by validating against the whole chunk.
 
-        Both strings are normalized before comparison to neutralize LLM
-        tokenization artifacts (v2.3 patch).
+        Algorithm:
+          1. Normalize the full chunk and the quote independently.
+          2. Require the normalized quote to meet the minimum token floor.
+          3. Return "passed" if the normalized quote is a substring of the
+             normalized chunk; "failed" otherwise.
 
         Args:
             chunk_id:   The unique chunk identifier (e.g. "doc_1_chunk_A").
@@ -124,19 +134,31 @@ class MechanicalVerifier:
         Returns:
             MechanicalVerificationResult with status, tier, and audit_proof.
         """
-        norm_chunk = self._normalize_text(chunk_text)
         norm_quote = self._normalize_text(llm_quote)
 
-        # Empty quote after normalization is always a failure.
+        # Empty quote after normalization → always fail.
         if not norm_quote:
             return self._failure(
                 chunk_id=chunk_id,
-                raw_chunk=chunk_text,
                 raw_quote=llm_quote,
-                norm_chunk=norm_chunk,
                 norm_quote=norm_quote,
                 failure_reason="Quote is empty after normalization.",
             )
+
+        # Minimum token guard — reject trivially short quotes.
+        quote_token_count = len(norm_quote.split())
+        if quote_token_count < _MIN_NORMALIZED_TOKENS:
+            return self._failure(
+                chunk_id=chunk_id,
+                raw_quote=llm_quote,
+                norm_quote=norm_quote,
+                failure_reason=(
+                    f"Quote is too short after normalization "
+                    f"({quote_token_count} tokens < {_MIN_NORMALIZED_TOKENS} required)."
+                ),
+            )
+
+        norm_chunk = self._normalize_text(chunk_text)
 
         if norm_quote in norm_chunk:
             return MechanicalVerificationResult(
@@ -147,28 +169,27 @@ class MechanicalVerifier:
                     "status": "passed",
                     "chunk_id": chunk_id,
                     "norm_quote": norm_quote,
-                    "norm_chunk_length": len(norm_chunk),
+                    "norm_quote_tokens": quote_token_count,
+                    "verification_scope": "full_chunk",
                 },
             )
 
         return self._failure(
             chunk_id=chunk_id,
-            raw_chunk=chunk_text,
             raw_quote=llm_quote,
-            norm_chunk=norm_chunk,
             norm_quote=norm_quote,
-            failure_reason="Normalized quote is not a substring of normalized chunk.",
+            failure_reason="Normalized quote not found in the chunk.",
         )
 
     # ------------------------------------------------------------------
-    # Normalization (the v2.3 whitespace-trap patch)
+    # Normalization
     # ------------------------------------------------------------------
 
     @staticmethod
     def _normalize_text(text: str) -> str:
         """
-        Canonical normalization pipeline applied identically to both the source
-        chunk and the LLM-supplied quote before substring comparison.
+        Canonical normalization applied identically to source sentences and the
+        LLM-supplied quote before substring comparison.
 
         Steps:
           1. Apply Unicode → ASCII substitution table (smart quotes, dashes, etc.)
@@ -178,22 +199,11 @@ class MechanicalVerifier:
           4. Strip all ASCII punctuation.
           5. Collapse all whitespace sequences to a single space and strip edges.
         """
-        # Step 1: Replace known Unicode artifacts with ASCII equivalents.
         text = text.translate(_UNICODE_SUBSTITUTION_TABLE)
-
-        # Step 2: NFKD decomposition — resolves ligatures, fullwidth chars, etc.
-        #         Encode to ASCII (ignore) to drop any surviving non-ASCII.
         text = unicodedata.normalize("NFKD", text).encode("ascii", errors="ignore").decode("ascii")
-
-        # Step 3: Lowercase.
         text = text.lower()
-
-        # Step 4: Strip punctuation.
         text = _PUNCTUATION_RE.sub("", text)
-
-        # Step 5: Collapse whitespace.
         text = _WHITESPACE_RE.sub(" ", text).strip()
-
         return text
 
     # ------------------------------------------------------------------
@@ -203,9 +213,7 @@ class MechanicalVerifier:
     @staticmethod
     def _failure(
         chunk_id: str,
-        raw_chunk: str,
         raw_quote: str,
-        norm_chunk: str,
         norm_quote: str,
         failure_reason: str,
     ) -> MechanicalVerificationResult:
@@ -221,6 +229,7 @@ class MechanicalVerifier:
                 "failure_reason": failure_reason,
                 "raw_quote": raw_quote,
                 "norm_quote": norm_quote,
-                "norm_chunk_snippet": norm_chunk[:200],
+                "norm_quote_snippet": norm_quote[:200],
+                "verification_scope": "full_chunk",
             },
         )

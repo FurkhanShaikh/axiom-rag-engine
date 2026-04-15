@@ -41,7 +41,7 @@ def make_final_sentence_dict(
     """Build a FinalSentence-shaped dict for test assertions."""
     label_map = {
         1: "authoritative",
-        2: "consensus",
+        2: "multi_source",
         3: "model_assisted",
         4: "misrepresented",
         5: "hallucinated",

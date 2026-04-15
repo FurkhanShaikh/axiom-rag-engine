@@ -78,18 +78,18 @@ def probe() -> None:
     Usage:
         python tasks.py probe "your question here"
         python tasks.py probe "your question here" --debug
-        python tasks.py probe "your question here" --debug --model ollama/qwen2.5:7b
+        python tasks.py probe "your question here" --debug --model ollama/gemma4:e4b
 
     Flags:
         --debug          Include full audit trail and pipeline stats in output.
         --model <id>     LiteLLM model ID for both synthesizer and verifier.
-                         Default: ollama/qwen3.5:9b
+                         Default: ollama/gemma4:e4b
     """
     args = sys.argv[2:]
     debug = "--debug" in args
     args = [a for a in args if a != "--debug"]
 
-    model = "ollama/qwen3.5:9b"
+    model = "ollama/gemma4:e4b"
     if "--model" in args:
         idx = args.index("--model")
         model = args[idx + 1]
