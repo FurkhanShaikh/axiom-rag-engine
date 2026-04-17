@@ -22,7 +22,7 @@ jobs:
       - name: Verify tag matches pyproject version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pyproject_version="$(grep -E '^version\s*=' pyproject.toml | head -1 | sed -E 's/version\s*=\s*"([^"]+)"/\1/')"
+          pyproject_version="$(grep -E '^version\s*=' pyproject.toml | head -1 | sed -E 's/version\s*=\s*"([^"]+)"/\1/' | tr -d '\r')"
           echo "tag=$tag  pyproject=$pyproject_version"
           if [ "$tag" != "$pyproject_version" ]; then
             echo "::error::Git tag ($tag) does not match pyproject.toml version ($pyproject_version)."
