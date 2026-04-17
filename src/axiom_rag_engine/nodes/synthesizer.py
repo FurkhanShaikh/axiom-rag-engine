@@ -395,7 +395,7 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
                 LLM_CALL_DURATION.labels(node="synthesizer", model=safe_model_label(model)).observe(
                     time.monotonic() - start
                 )
-                record_llm_usage(getattr(response, "usage", None), "synthesizer")
+                record_llm_usage(getattr(response, "usage", None), "synthesizer", model)
             raw_content = response.choices[0].message.content or ""
             output = _parse_llm_response(raw_content)
             break

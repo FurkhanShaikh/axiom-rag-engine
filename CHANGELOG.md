@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AXIOM_LOG_AUDIT_EVENTS` — when true, every audit event is emitted as a structured log line (pairs with `LOG_FORMAT=json`).
 - `source_weight` / `chunk_weight` on `AppConfig` — formal request-body fields for the ranker weight blend.
 - Pre-built Grafana dashboard at `deploy/grafana/axiom-engine.json` for the exposed Prometheus metrics.
+- **Per-request token + cost accounting**: every response carries a `usage` block (calls, prompt/completion/total tokens, best-effort USD cost via `litellm.completion_cost`, per-model breakdown). Cache hits report `usage: null`.
+- Prometheus counters `axiom_llm_tokens_total{model, kind}` and `axiom_llm_cost_usd_total{model}`. Model labels are bounded by the existing `safe_model_label` allowlist.
+- Synthetic terminal `usage_summary` audit event so the CLI + `/v1/audits/{id}` show per-request cost without joining separate streams.
+- **docker-compose stack** now bundles Redis (cache), Prometheus (scraper), and Grafana (auto-provisioned with the Axiom dashboard + Prometheus datasource) alongside Axiom and Ollama.
 
 ### Changed
 - `check-config` now prints values grouped by section along with the effective source (`env` / `.env` / `default`) and the canonical env var name.

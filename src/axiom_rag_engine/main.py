@@ -26,6 +26,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import (  # noqa: F401 — HTTPException re-exported for test compat
@@ -69,7 +70,11 @@ from axiom_rag_engine.scoring import (  # noqa: F401 — re-exported
     determine_status,
 )
 from axiom_rag_engine.state import make_initial_state
-from axiom_rag_engine.utils.llm import LLMBudgetExceededError, reset_llm_budget
+from axiom_rag_engine.utils.llm import (
+    LLMBudgetExceededError,
+    get_llm_usage_snapshot,
+    reset_llm_budget,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -225,8 +230,16 @@ def _response_to_cache_value(response: AxiomResponse) -> dict[str, Any]:
 
 
 def _hydrate_cached_response(request_id: str, cached: dict[str, Any]) -> AxiomResponse:
-    """Rebuild a response for the current request from cached template data."""
-    return AxiomResponse.model_validate({"request_id": request_id, **copy.deepcopy(cached)})
+    """Rebuild a response for the current request from cached template data.
+
+    Strips the stored ``usage`` block because a cache hit consumes zero
+    tokens and zero cost — the caller's billing view should reflect *this*
+    request's actual consumption, not the upstream one that populated the
+    cache.
+    """
+    data = copy.deepcopy(cached)
+    data["usage"] = None
+    return AxiomResponse.model_validate({"request_id": request_id, **data})
 
 
 def _get_cached(key: str, request_id: str) -> AxiomResponse | None:
@@ -521,15 +534,20 @@ async def synthesize(
             graph_result = await engine.ainvoke(initial_state)
     except LLMBudgetExceededError as exc:
         REQUESTS_BY_STATUS.labels(status="error").inc()
-        error_resp = make_error_response(payload.request_id, exc)
+        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
         return JSONResponse(status_code=429, content=error_resp.model_dump())
     except Exception as exc:
         REQUESTS_BY_STATUS.labels(status="error").inc()
-        error_resp = make_error_response(payload.request_id, exc)
+        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
         # H4: unrecoverable pipeline failures are HTTP 500.
         return JSONResponse(status_code=500, content=error_resp.model_dump())
 
-    response = marshal_response(payload.request_id, graph_result, payload.include_debug)
+    response = marshal_response(
+        payload.request_id,
+        graph_result,
+        payload.include_debug,
+        get_llm_usage_snapshot(),
+    )
 
     # Update Prometheus metrics.
     REQUESTS_BY_STATUS.labels(status=response.status).inc()
@@ -538,7 +556,12 @@ async def synthesize(
         TIER_ASSIGNMENTS.labels(tier=str(tier)).inc()
 
     # Persist the audit trail + optionally emit each event to the logs.
-    _persist_and_emit_audit(payload.request_id, response.status, graph_result)
+    _persist_and_emit_audit(
+        payload.request_id,
+        response.status,
+        graph_result,
+        usage_snapshot=response.usage.model_dump() if response.usage else None,
+    )
 
     # Cache successful and partial responses only — not errors or unanswerable.
     if response.status in ("success", "partial"):
@@ -552,7 +575,12 @@ async def synthesize(
 # ---------------------------------------------------------------------------
 
 
-def _persist_and_emit_audit(request_id: str, status: str, graph_result: dict[str, Any]) -> None:
+def _persist_and_emit_audit(
+    request_id: str,
+    status: str,
+    graph_result: dict[str, Any],
+    usage_snapshot: dict[str, Any] | None = None,
+) -> None:
     """Push the audit trail into the in-memory store and (optionally) logs.
 
     Both operations are best-effort: a retrieval failure on the operator side
@@ -560,6 +588,19 @@ def _persist_and_emit_audit(request_id: str, status: str, graph_result: dict[str
     """
     settings = get_settings()
     audit_trail = list(graph_result.get("audit_trail") or [])
+
+    # Append a synthetic terminal event so downstream consumers (audit CLI,
+    # log aggregators) see per-request cost without joining separate streams.
+    if usage_snapshot:
+        audit_trail.append(
+            {
+                "event_id": f"{request_id}-usage",
+                "node": "engine",
+                "event_type": "usage_summary",
+                "timestamp_utc": datetime.now(UTC).isoformat(),
+                "payload": usage_snapshot,
+            }
+        )
 
     store: AuditStore | None = getattr(app.state, "audit_store", None)
     if store is not None and store.enabled:

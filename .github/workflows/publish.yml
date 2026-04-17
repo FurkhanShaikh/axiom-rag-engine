@@ -12,12 +12,36 @@ jobs:
   build:
     needs: ci
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.release-type.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v6
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Set up Python
         run: uv python install 3.11
+
+      - name: Verify tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject_version="$(grep -E '^version\s*=' pyproject.toml | head -1 | sed -E 's/version\s*=\s*"([^"]+)"/\1/')"
+          echo "tag=$tag  pyproject=$pyproject_version"
+          if [ "$tag" != "$pyproject_version" ]; then
+            echo "::error::Git tag ($tag) does not match pyproject.toml version ($pyproject_version)."
+            exit 1
+          fi
+
+      - name: Classify release (pre-release vs final)
+        id: release-type
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # PEP 440 pre-release segments: aN, bN, rcN, .devN, -rcN (loose)
+          if echo "$version" | grep -Eq '(a|b|rc|dev)[0-9]+|-rc'; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build package
         run: uv build --no-sources
       - uses: actions/upload-artifact@v4
@@ -26,7 +50,7 @@ jobs:
           path: dist/
 
   publish-testpypi:
-    if: contains(github.ref, '-rc')
+    if: needs.build.outputs.prerelease == 'true'
     needs: build
     runs-on: ubuntu-latest
     environment: testpypi
@@ -39,11 +63,14 @@ jobs:
           path: dist/
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Publish to TestPyPI
-        run: uv publish --publish-url https://test.pypi.org/legacy/
+      - name: Publish to TestPyPI (idempotent)
+        run: >
+          uv publish
+          --publish-url https://test.pypi.org/legacy/
+          --check-url https://test.pypi.org/simple/
 
   publish-pypi:
-    if: "!contains(github.ref, '-rc')"
+    if: needs.build.outputs.prerelease == 'false'
     needs: build
     runs-on: ubuntu-latest
     environment: pypi
@@ -56,5 +83,5 @@ jobs:
           path: dist/
       - name: Install uv
         uses: astral-sh/setup-uv@v7
-      - name: Publish to PyPI
-        run: uv publish
+      - name: Publish to PyPI (idempotent)
+        run: uv publish --check-url https://pypi.org/simple/

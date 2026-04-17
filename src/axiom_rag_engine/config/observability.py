@@ -64,6 +64,20 @@ NODE_DURATION = Histogram(
     buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60],
 )
 
+# ``kind`` is one of {"prompt", "completion"}. Model label is bounded by
+# ``safe_model_label`` so customers can't spike cardinality via per-request
+# model overrides.
+LLM_TOKENS_TOTAL = Counter(
+    "axiom_llm_tokens_total",
+    "Cumulative LLM tokens consumed, labelled by model and kind.",
+    ["model", "kind"],
+)
+LLM_COST_USD_TOTAL = Counter(
+    "axiom_llm_cost_usd_total",
+    "Cumulative LLM cost in USD (best-effort via litellm.completion_cost).",
+    ["model"],
+)
+
 _prometheus_initialized = False
 
 

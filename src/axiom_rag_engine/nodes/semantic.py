@@ -461,7 +461,7 @@ async def _verify_citation(
         LLM_CALL_DURATION.labels(node="semantic", model=safe_model_label(model)).observe(
             time.monotonic() - start
         )
-        record_llm_usage(getattr(response, "usage", None), "semantic")
+        record_llm_usage(getattr(response, "usage", None), "semantic", model)
     raw = response.choices[0].message.content or ""
     data = _parse_semantic_response(raw)
 

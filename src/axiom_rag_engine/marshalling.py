@@ -17,8 +17,29 @@ from axiom_rag_engine.models import (
     DebugInfo,
     FinalSentence,
     TierBreakdown,
+    UsageByModel,
+    UsageSummary,
 )
 from axiom_rag_engine.scoring import compute_confidence_summary, determine_status
+
+
+def _usage_summary_from_snapshot(snapshot: dict[str, Any] | None) -> UsageSummary | None:
+    """Build a validated UsageSummary from the dict returned by
+    ``get_llm_usage_snapshot`` — or ``None`` if no LLM calls were observed."""
+    if not snapshot or not snapshot.get("calls"):
+        return None
+    return UsageSummary(
+        calls=snapshot.get("calls", 0),
+        prompt_tokens=snapshot.get("prompt_tokens", 0),
+        completion_tokens=snapshot.get("completion_tokens", 0),
+        total_tokens=snapshot.get("total_tokens", 0),
+        cost_usd=snapshot.get("cost_usd", 0.0),
+        by_model={
+            model: UsageByModel.model_validate(row)
+            for model, row in (snapshot.get("by_model") or {}).items()
+        },
+    )
+
 
 logger = logging.getLogger("axiom_rag_engine.marshalling")
 
@@ -27,6 +48,7 @@ def marshal_response(
     request_id: str,
     graph_result: dict[str, Any],
     include_debug: bool = False,
+    usage_snapshot: dict[str, Any] | None = None,
 ) -> AxiomResponse:
     """
     Convert the raw GraphState dict returned by the compiled graph into
@@ -62,12 +84,14 @@ def marshal_response(
         confidence_summary=confidence,
         final_response=final_sentences,
         debug=debug,
+        usage=_usage_summary_from_snapshot(usage_snapshot),
     )
 
 
 def make_error_response(
     request_id: str,
     error: Exception,
+    usage_snapshot: dict[str, Any] | None = None,
 ) -> AxiomResponse:
     """
     Build a structured error response matching the AxiomResponse schema.
@@ -91,4 +115,5 @@ def make_error_response(
         ),
         final_response=[],
         error_message=f"Internal pipeline error — see server logs for request {request_id}.",
+        usage=_usage_summary_from_snapshot(usage_snapshot),
     )

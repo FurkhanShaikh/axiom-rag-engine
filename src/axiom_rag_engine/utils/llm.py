@@ -9,6 +9,7 @@ litellm.acompletion() call sites.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 from typing import Any
 
@@ -28,9 +29,17 @@ _DEFAULT_TIMEOUT: int = 600
 # Values are sourced from Settings (AXIOM_MAX_LLM_CALLS_PER_REQUEST,
 # AXIOM_MAX_TOKENS_PER_REQUEST) at reset time.
 
-# ContextVar holds {"remaining": N, "tokens_used": 0, "token_cap": M} so all
-# tasks created from the same request coroutine share one counter object.
-_llm_budget_ctx: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+# ContextVar holds a mutable dict so all tasks created from the same request
+# coroutine share one counter object. Keys:
+#   remaining        — int, call budget left before LLMBudgetExceededError
+#   tokens_used      — int, running total of total_tokens (for the token cap)
+#   token_cap        — int, 0 = unlimited
+#   calls            — int, count of completed LLM calls (usage observed)
+#   prompt_tokens    — int, cumulative prompt tokens
+#   completion_tokens— int, cumulative completion tokens
+#   cost_usd         — float, cumulative USD cost (best-effort via litellm)
+#   by_model         — dict[str, dict] — per-model breakdown with the same fields
+_llm_budget_ctx: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "axiom_llm_budget", default=None
 )
 
@@ -44,7 +53,18 @@ def reset_llm_budget(max_calls: int | None = None, max_tokens: int | None = None
     settings = get_settings()
     cap = max_calls if max_calls is not None else settings.max_llm_calls_per_request
     token_cap = max_tokens if max_tokens is not None else settings.max_tokens_per_request
-    _llm_budget_ctx.set({"remaining": cap, "tokens_used": 0, "token_cap": token_cap})
+    _llm_budget_ctx.set(
+        {
+            "remaining": cap,
+            "tokens_used": 0,
+            "token_cap": token_cap,
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "by_model": {},
+        }
+    )
     return cap
 
 
@@ -65,31 +85,116 @@ def consume_llm_budget(node: str) -> None:
     budget["remaining"] -= 1
 
 
-def record_llm_usage(usage: Any, node: str) -> None:
+def record_llm_usage(usage: Any, node: str, model: str | None = None) -> None:
     """
-    Accumulate token counts from a completed LLM response and enforce the token cap.
+    Accumulate token counts + cost from a completed LLM response and enforce
+    the token cap. Also emits Prometheus counters (``axiom_llm_tokens_total``,
+    ``axiom_llm_cost_usd_total``) when ``model`` is provided.
 
     Call this immediately after a successful ``litellm.acompletion()`` call:
-        record_llm_usage(response.usage, "synthesizer")
+        record_llm_usage(response.usage, "synthesizer", model)
 
-    No-op when:
-      - No budget has been initialized (unit tests / direct-call paths).
-      - ``usage`` is None (provider did not return usage metadata).
-      - Token cap is 0 (unlimited).
+    No-op when no budget has been initialized (unit tests / direct-call paths).
+    Missing provider usage is tolerated — only counters with non-zero data are
+    updated. Cost is best-effort via ``litellm.completion_cost``; Ollama and
+    other local backends will report 0.
 
     Raises LLMBudgetExceededError if the cumulative token count exceeds the cap.
     """
     budget = _llm_budget_ctx.get()
-    if budget is None or usage is None:
+    if budget is None:
         return
-    total_tokens: int = int(getattr(usage, "total_tokens", 0) or 0)
+
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) if usage is not None else 0
+    if total_tokens == 0:
+        total_tokens = prompt_tokens + completion_tokens
+
+    # Providers without a price entry (Ollama, custom endpoints) or version-skew
+    # raise inside completion_cost; a missing cost is not a request failure.
+    cost_usd = 0.0
+    if usage is not None and model is not None:
+        with contextlib.suppress(Exception):
+            import litellm
+
+            cost_usd = float(
+                litellm.completion_cost(
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+                or 0.0
+            )
+
+    budget["calls"] = budget.get("calls", 0) + 1
+    budget["prompt_tokens"] = budget.get("prompt_tokens", 0) + prompt_tokens
+    budget["completion_tokens"] = budget.get("completion_tokens", 0) + completion_tokens
     budget["tokens_used"] = budget.get("tokens_used", 0) + total_tokens
-    token_cap: int = budget.get("token_cap", 0)
+    budget["cost_usd"] = budget.get("cost_usd", 0.0) + cost_usd
+
+    if model is not None:
+        by_model: dict[str, dict[str, Any]] = budget.setdefault("by_model", {})
+        row = by_model.setdefault(
+            model,
+            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+        )
+        row["calls"] += 1
+        row["prompt_tokens"] += prompt_tokens
+        row["completion_tokens"] += completion_tokens
+        row["cost_usd"] += cost_usd
+
+        # Emit Prometheus counters; label cardinality is bounded by safe_model_label.
+        # Never let metrics emission break a request.
+        with contextlib.suppress(Exception):
+            from axiom_rag_engine.config.observability import (
+                LLM_COST_USD_TOTAL,
+                LLM_TOKENS_TOTAL,
+                safe_model_label,
+            )
+
+            label = safe_model_label(model)
+            if prompt_tokens:
+                LLM_TOKENS_TOTAL.labels(model=label, kind="prompt").inc(prompt_tokens)
+            if completion_tokens:
+                LLM_TOKENS_TOTAL.labels(model=label, kind="completion").inc(completion_tokens)
+            if cost_usd:
+                LLM_COST_USD_TOTAL.labels(model=label).inc(cost_usd)
+
+    token_cap: int = int(budget.get("token_cap", 0) or 0)
     if token_cap > 0 and budget["tokens_used"] > token_cap:
         raise LLMBudgetExceededError(
             f"Token budget exceeded after {node} call: "
             f"{budget['tokens_used']} tokens used (cap {token_cap})."
         )
+
+
+def get_llm_usage_snapshot() -> dict[str, Any]:
+    """Return an immutable snapshot of accumulated LLM usage for this request.
+
+    Empty snapshot (all zeros, empty by_model) when no budget has been
+    initialized. Safe to call at any point — typically invoked after the
+    graph has finished to attach usage to the response payload.
+    """
+    budget = _llm_budget_ctx.get()
+    if budget is None:
+        return {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "by_model": {},
+        }
+    by_model = {m: dict(row) for m, row in (budget.get("by_model") or {}).items()}
+    return {
+        "calls": int(budget.get("calls", 0) or 0),
+        "prompt_tokens": int(budget.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(budget.get("completion_tokens", 0) or 0),
+        "total_tokens": int(budget.get("tokens_used", 0) or 0),
+        "cost_usd": float(budget.get("cost_usd", 0.0) or 0.0),
+        "by_model": by_model,
+    }
 
 
 # ---------------------------------------------------------------------------

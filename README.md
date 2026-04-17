@@ -151,12 +151,35 @@ the log stream into your existing aggregator.
 ### Metrics dashboard
 
 `GET /metrics` exposes Prometheus metrics including `axiom_pipeline_duration_seconds`,
-per-node and per-model LLM latency histograms, tier assignment rates, cache
-hit ratio, and verification-degradation counters.
+per-node and per-model LLM latency histograms, **per-model token + USD cost
+counters** (`axiom_llm_tokens_total`, `axiom_llm_cost_usd_total`), tier
+assignment rates, cache hit ratio, and verification-degradation counters.
 
 A ready-to-import Grafana dashboard lives at
-[`deploy/grafana/axiom-engine.json`](deploy/grafana/axiom-engine.json) — load it
-from Grafana → Dashboards → Import and select your Prometheus datasource.
+[`deploy/grafana/axiom-engine.json`](deploy/grafana/axiom-engine.json). The
+quickest way to see it wired up end-to-end is the docker-compose stack below.
+
+### Token + cost accounting
+
+Every response includes a `usage` block with call count, prompt/completion
+tokens, best-effort USD cost, and a per-model breakdown:
+
+```json
+"usage": {
+  "calls": 2,
+  "prompt_tokens": 2661,
+  "completion_tokens": 169,
+  "total_tokens": 2830,
+  "cost_usd": 0.00042,
+  "by_model": {
+    "claude-sonnet-4-5": {"calls": 1, "prompt_tokens": 2500, "completion_tokens": 150, "cost_usd": 0.00040}
+  }
+}
+```
+
+Cost is computed via `litellm.completion_cost`. Local models (Ollama) and
+untracked providers report `0.0`. Cache hits return `usage: null` because
+the current request consumed no tokens.
 
 ### Quick health walk
 
@@ -191,9 +214,23 @@ See the interactive docs at `http://localhost:8000/docs` when the server is runn
 
 ## Docker
 
+The bundled `docker-compose.yml` brings up the full stack — Axiom, Ollama,
+Redis (cache backing store), Prometheus (scraping `/metrics`), and Grafana
+with the dashboard pre-provisioned:
+
 ```bash
 docker compose up --build
 ```
+
+Endpoints once the stack is healthy:
+
+- Axiom API  — http://localhost:8000
+- Prometheus — http://localhost:9090
+- Grafana    — http://localhost:3000  (login `admin` / `admin`)
+  → *Dashboards → Axiom → Axiom Engine*
+
+To run without the observability sidecars, comment out the `redis`,
+`prometheus`, and `grafana` services.
 
 ## License
 

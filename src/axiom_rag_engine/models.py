@@ -246,6 +246,33 @@ class FinalSentence(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class UsageByModel(BaseModel):
+    """Per-model LLM consumption for one request."""
+
+    calls: int = Field(default=0, ge=0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Best-effort cost via litellm.completion_cost. "
+            "Local backends (Ollama) and untracked providers report 0.0."
+        ),
+    )
+
+
+class UsageSummary(BaseModel):
+    """Aggregate LLM consumption for one request."""
+
+    calls: int = Field(default=0, ge=0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0.0)
+    by_model: dict[str, UsageByModel] = Field(default_factory=dict)
+
+
 class TierBreakdown(BaseModel):
     tier_1_claims: int = 0
     tier_2_claims: int = 0
@@ -297,4 +324,8 @@ class AxiomResponse(BaseModel):
     debug: DebugInfo | None = Field(
         default=None,
         description="Full audit trail and pipeline stats. Populated only when include_debug=true.",
+    )
+    usage: UsageSummary | None = Field(
+        default=None,
+        description="LLM token counts and best-effort USD cost for this request.",
     )
