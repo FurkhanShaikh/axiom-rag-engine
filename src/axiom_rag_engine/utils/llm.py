@@ -249,8 +249,15 @@ def build_completion_kwargs(
 
     if model.startswith("ollama/"):
         kwargs["api_base"] = get_settings().ollama_api_base
-        # Disable chain-of-thought thinking for Qwen3-family models.
-        kwargs["extra_body"] = {"think": False}
+        extra: dict[str, Any] = {}
+        # Qwen3 models expose a `think` parameter to suppress chain-of-thought.
+        # Other models reject it, so only set it for qwen3/* variants.
+        if "qwen3" in model.lower():
+            extra["think"] = False
+        if json_mode:
+            extra["format"] = "json"
+        if extra:
+            kwargs["extra_body"] = extra
     elif json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 

@@ -213,6 +213,21 @@ class Settings(BaseSettings):
         description="Ollama server URL used when a request specifies ollama/<model>.",
         alias="OLLAMA_API_BASE",
     )
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Tavily search API key. When set, enables live web retrieval.",
+        alias="TAVILY_API_KEY",
+    )
+    anthropic_api_key: str | None = Field(
+        default=None,
+        description="Anthropic API key. Presence enables claude-* model selection.",
+        alias="ANTHROPIC_API_KEY",
+    )
+    openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI API key. Presence enables gpt-* model selection.",
+        alias="OPENAI_API_KEY",
+    )
 
     # ── Audit ────────────────────────────────────────────────────────────
     audit_retention: int = Field(

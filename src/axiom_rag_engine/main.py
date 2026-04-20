@@ -83,6 +83,130 @@ from axiom_rag_engine.utils.llm import (
 
 logger = logging.getLogger("axiom_rag_engine")
 
+# ---------------------------------------------------------------------------
+# LLM provider detection
+# ---------------------------------------------------------------------------
+
+# Python-level defaults from settings.py — used to detect "not explicitly set"
+_SETTINGS_DEFAULT_SYNTH = "claude-sonnet-4-5"
+_SETTINGS_DEFAULT_VERIF = "gpt-4o-mini"
+
+# Ollama model preference order (first match wins)
+_OLLAMA_PREFERENCE = [
+    "qwen3:8b", "qwen3:4b", "qwen3:1.7b",
+    "llama3.2:3b", "llama3:8b",
+    "mistral:7b", "gemma2:9b",
+]
+
+
+def _list_ollama_models(base_url: str) -> list[str]:
+    """Return available Ollama model names, or [] if Ollama is unreachable."""
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=2) as resp:
+            data = json.loads(resp.read())
+            return [m["name"] for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
+def _best_ollama_model(models: list[str]) -> str | None:
+    for preferred in _OLLAMA_PREFERENCE:
+        family = preferred.split(":")[0]
+        match = next((m for m in models if m.startswith(family)), None)
+        if match:
+            return match
+    return models[0] if models else None
+
+
+def _resolve_llm_defaults(
+    settings: Any,
+) -> tuple[str, str]:
+    """
+    Detect available LLM providers and return (synthesizer_model, verifier_model).
+
+    Resolution order:
+      1. If the operator explicitly set AXIOM_DEFAULT_*_MODEL (differs from the
+         built-in default), trust their choice unconditionally.
+      2. Otherwise, auto-select by probing for API keys and Ollama availability:
+         synthesizer: Anthropic > OpenAI > Ollama
+         verifier:    OpenAI   > Anthropic > Ollama
+      3. If no provider is reachable, raise RuntimeError at startup rather than
+         letting requests fail mid-pipeline with an opaque error.
+    """
+    has_anthropic = bool(settings.anthropic_api_key)
+    has_openai = bool(settings.openai_api_key)
+
+    ollama_models = _list_ollama_models(settings.ollama_api_base)
+    best_ollama = _best_ollama_model(ollama_models)
+    has_ollama = best_ollama is not None
+
+    configured_synth = settings.default_synthesizer_model
+    configured_verif = settings.default_verifier_model
+    operator_set_synth = configured_synth != _SETTINGS_DEFAULT_SYNTH
+    operator_set_verif = configured_verif != _SETTINGS_DEFAULT_VERIF
+
+    def _select(role: str, operator_set: bool, configured: str) -> str:
+        if operator_set:
+            return configured
+
+        if role == "synthesizer":
+            if has_anthropic:
+                return "claude-sonnet-4-6"
+            if has_openai:
+                return "gpt-4o"
+            if has_ollama:
+                return f"ollama/{best_ollama}"
+        else:  # verifier
+            if has_openai:
+                return "gpt-4o-mini"
+            if has_anthropic:
+                return "claude-haiku-4-5-20251001"
+            if has_ollama:
+                return f"ollama/{best_ollama}"
+
+        return configured
+
+    if not has_anthropic and not has_openai and not has_ollama:
+        raise RuntimeError(
+            "No LLM provider is available. Configure one of:\n"
+            "  • ANTHROPIC_API_KEY  (recommended for production)\n"
+            "  • OPENAI_API_KEY\n"
+            f"  • Ollama running at {settings.ollama_api_base} with at least one model pulled\n"
+            "Or set AXIOM_DEFAULT_SYNTHESIZER_MODEL / AXIOM_DEFAULT_VERIFIER_MODEL explicitly."
+        )
+
+    synth = _select("synthesizer", operator_set_synth, configured_synth)
+    verif = _select("verifier", operator_set_verif, configured_verif)
+
+    if synth != configured_synth:
+        logger.warning(
+            "Synthesizer default auto-selected: '%s' (configured '%s' requires a missing API key). "
+            "Set AXIOM_DEFAULT_SYNTHESIZER_MODEL to silence this.",
+            synth,
+            configured_synth,
+        )
+    else:
+        logger.info("Synthesizer model: %s%s", synth, " (operator-configured)" if operator_set_synth else "")
+
+    if verif != configured_verif:
+        logger.warning(
+            "Verifier default auto-selected: '%s' (configured '%s' requires a missing API key). "
+            "Set AXIOM_DEFAULT_VERIFIER_MODEL to silence this.",
+            verif,
+            configured_verif,
+        )
+    else:
+        logger.info("Verifier model: %s%s", verif, " (operator-configured)" if operator_set_verif else "")
+
+    if has_ollama:
+        logger.info("Ollama reachable at %s — available models: %s", settings.ollama_api_base, ", ".join(ollama_models))
+    else:
+        logger.debug("Ollama not reachable at %s.", settings.ollama_api_base)
+
+    return synth, verif
+
 
 def _allow_mock_search() -> bool:
     return get_settings().allow_mock_search
@@ -290,10 +414,24 @@ async def lifespan(app: FastAPI):
     if _auth_required() and not _api_keys():
         raise RuntimeError("AXIOM_API_KEYS must be configured when AXIOM_ENV is not development.")
 
+    # Push vendor API keys from Settings into os.environ so LiteLLM can find them.
+    # pydantic-settings reads .env into the Settings model but does not populate
+    # os.environ; LiteLLM reads keys from the process environment directly.
+    if settings.anthropic_api_key:
+        os.environ.setdefault("ANTHROPIC_API_KEY", settings.anthropic_api_key)
+    if settings.openai_api_key:
+        os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+
+    # Detect available LLM providers and resolve effective model defaults.
+    # Stored on app.state so endpoints can inject them without re-probing per request.
+    synth_model, verif_model = _resolve_llm_defaults(settings)
+    app.state.default_synthesizer_model = synth_model
+    app.state.default_verifier_model = verif_model
+
     # Wire search backend — Tavily if key present, else MockSearchBackend.
     # TAVILY_API_KEY is read directly (not via Settings) because it lacks the
     # AXIOM_ prefix — it's a vendor credential, not an app setting.
-    tavily_key = os.environ.get("TAVILY_API_KEY")
+    tavily_key = settings.tavily_api_key
     if tavily_key:
         from axiom_rag_engine.search.tavily import TavilySearchBackend
 
@@ -502,6 +640,14 @@ async def synthesize(
     effective_app_config = _effective_app_config(payload)
     effective_pipeline_config = _effective_pipeline_config(payload)
 
+    # Resolve model config: prefer caller's explicit choice, fall back to the
+    # startup-detected defaults (which already account for available API keys).
+    models_config = payload.models.model_dump()
+    if not models_config.get("synthesizer"):
+        models_config["synthesizer"] = app.state.default_synthesizer_model
+    if not models_config.get("verifier"):
+        models_config["verifier"] = app.state.default_verifier_model
+
     # Cache lookup — keyed by (api_key_hash, payload_hash) to prevent
     # cross-tenant cache sharing (H3).
     key = _cache_key(payload, _api_key, effective_app_config, effective_pipeline_config)
@@ -517,7 +663,7 @@ async def synthesize(
         request_id=payload.request_id,
         user_query=payload.user_query,
         app_config=effective_app_config,
-        models_config=payload.models.model_dump(),
+        models_config=models_config,
         pipeline_config=effective_pipeline_config,
     )
 
@@ -596,6 +742,12 @@ async def synthesize_stream(
     effective_app_config = _effective_app_config(payload)
     effective_pipeline_config = _effective_pipeline_config(payload)
 
+    models_config = payload.models.model_dump()
+    if not models_config.get("synthesizer"):
+        models_config["synthesizer"] = app.state.default_synthesizer_model
+    if not models_config.get("verifier"):
+        models_config["verifier"] = app.state.default_verifier_model
+
     key = _cache_key(payload, _api_key, effective_app_config, effective_pipeline_config)
     cached = _get_cached(key, payload.request_id)
     if cached is not None:
@@ -609,7 +761,7 @@ async def synthesize_stream(
         request_id=payload.request_id,
         user_query=payload.user_query,
         app_config=effective_app_config,
-        models_config=payload.models.model_dump(),
+        models_config=models_config,
         pipeline_config=effective_pipeline_config,
     )
 
@@ -807,8 +959,8 @@ async def get_status(request: Request) -> dict[str, Any]:
             "max_concurrent_llm": settings.max_concurrent_llm,
         },
         "models": {
-            "synthesizer_default": settings.default_synthesizer_model,
-            "verifier_default": settings.default_verifier_model,
+            "synthesizer_default": getattr(state, "default_synthesizer_model", settings.default_synthesizer_model),
+            "verifier_default": getattr(state, "default_verifier_model", settings.default_verifier_model),
         },
         "observability": {
             "log_format": settings.log_format,

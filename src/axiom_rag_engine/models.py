@@ -52,14 +52,18 @@ class AppConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """LiteLLM model identifiers for each pipeline stage."""
+    """LiteLLM model identifiers for each pipeline stage.
 
-    synthesizer: str = Field(
-        default_factory=lambda: get_settings().default_synthesizer_model,
+    Fields are optional so callers can omit them and let the endpoint inject
+    the startup-detected defaults (which account for available API keys).
+    """
+
+    synthesizer: str | None = Field(
+        default=None,
         description="Heavy model used for answer generation.",
     )
-    verifier: str = Field(
-        default_factory=lambda: get_settings().default_verifier_model,
+    verifier: str | None = Field(
+        default=None,
         description="Lightweight model used for semantic verification.",
     )
 

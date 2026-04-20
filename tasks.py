@@ -51,7 +51,13 @@ def install() -> None:
 
 def run() -> None:
     """Start the FastAPI development server at http://localhost:8000."""
-    _run("uv", "run", "uvicorn", "axiom_rag_engine.main:app", "--reload")
+    import os
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    subprocess.run(  # noqa: S603
+        ["uv", "run", "uvicorn", "axiom_rag_engine.main:app", "--reload"],
+        check=True,
+        env=env,
+    )
 
 
 def test() -> None:

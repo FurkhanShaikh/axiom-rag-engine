@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 from axiom_rag_engine.marshalling import marshal_response
 from axiom_rag_engine.utils.llm import LLMBudgetExceededError, get_llm_usage_snapshot
+
+logger = logging.getLogger("axiom_rag_engine.api.sse")
 
 if TYPE_CHECKING:
     from axiom_rag_engine.models import AxiomRequest, AxiomResponse
@@ -142,16 +145,32 @@ async def stream_pipeline(
     accumulated: dict[str, Any] = dict(initial_state)
     accumulated["audit_trail"] = list(initial_state.get("audit_trail") or [])
 
+    async def _next(iterator: Any) -> Any:
+        return await iterator.__anext__()
+
     try:
         it = engine.astream_events(initial_state, version="v2").__aiter__()
+        pending_event: asyncio.Task[Any] | None = None
         while True:
-            try:
-                event = await asyncio.wait_for(it.__anext__(), timeout=_KEEPALIVE_INTERVAL)
-            except TimeoutError:
+            if pending_event is None:
+                pending_event = asyncio.ensure_future(_next(it))
+            # Race the next pipeline event against a keepalive timer so we
+            # don't cancel __anext__() when we want to emit a keepalive.
+            timeout_task = asyncio.ensure_future(asyncio.sleep(_KEEPALIVE_INTERVAL))
+            done, _pending_set = await asyncio.wait(
+                {pending_event, timeout_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if pending_event not in done:
+                timeout_task.cancel()
                 yield ": keepalive\n\n"
                 continue
+            timeout_task.cancel()
+            try:
+                event = pending_event.result()
             except StopAsyncIteration:
+                pending_event = None
                 break
+            pending_event = None
 
             evt_type: str = event.get("event", "")
             name: str = event.get("name", "")
@@ -181,6 +200,15 @@ async def stream_pipeline(
                 output: dict[str, Any] = data.get("output") or {}
                 if isinstance(output, dict):
                     _apply_node_update(accumulated, output)
+                if name == "verifier":
+                    logger.debug(
+                        "[%s] verifier on_chain_end: output type=%s keys=%s final_sentences=%d draft_sentences_in_accum=%d",
+                        payload.request_id,
+                        type(data.get("output")).__name__,
+                        list(output.keys()) if isinstance(output, dict) else "N/A",
+                        len(output.get("final_sentences") or []) if isinstance(output, dict) else -1,
+                        len(accumulated.get("draft_sentences") or []),
+                    )
 
                 metadata = _stage_metadata(
                     name, "complete", output if isinstance(output, dict) else {}
@@ -242,6 +270,14 @@ async def stream_pipeline(
         )
         return
     except Exception as exc:
+        try:
+            logger.exception(
+                "Unhandled pipeline error for request %s: %s",
+                payload.request_id,
+                ascii(str(exc)),
+            )
+        except Exception:
+            pass
         yield _sse(
             "error",
             {
@@ -255,6 +291,16 @@ async def stream_pipeline(
         return
 
     # -- marshal final response --
+    final_sentences = accumulated.get("final_sentences") or []
+    logger.debug(
+        "Stream complete for %s — final_sentences=%d is_answerable=%s",
+        payload.request_id,
+        len(final_sentences),
+        accumulated.get("is_answerable"),
+    )
+    if final_sentences:
+        first = final_sentences[0].get("verification", {})
+        logger.debug("First sentence tier=%s mech=%s", first.get("tier"), first.get("mechanical_check"))
     usage_snapshot = get_llm_usage_snapshot()
     response = marshal_response(
         payload.request_id,
