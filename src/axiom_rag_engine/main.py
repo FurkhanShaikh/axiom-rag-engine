@@ -325,6 +325,11 @@ limiter = Limiter(
     default_limits=[_startup_settings.rate_limit],
 )
 
+# Captured at import time because @limiter.limit() consumes its string at
+# decoration time — settings changes after startup do not apply to decorators
+# already bound to the streaming endpoint.
+_STREAM_RATE_LIMIT: str = _startup_settings.stream_rate_limit
+
 # ---------------------------------------------------------------------------
 # Response cache (bounded, TTL-based)
 # ---------------------------------------------------------------------------
@@ -747,7 +752,7 @@ async def synthesize(
     "/v1/synthesize/stream",
     summary="Run the Axiom Engine pipeline with SSE progress events.",
 )
-@limiter.limit("20/minute")
+@limiter.limit(_STREAM_RATE_LIMIT)
 async def synthesize_stream(
     request: Request,
     payload: AxiomRequest,
@@ -979,6 +984,7 @@ async def get_status(request: Request) -> dict[str, Any]:
         },
         "limits": {
             "rate_limit": settings.rate_limit,
+            "stream_rate_limit": _STREAM_RATE_LIMIT,
             "max_body_bytes": _MAX_BODY_BYTES,
             "max_llm_calls_per_request": settings.max_llm_calls_per_request,
             "max_tokens_per_request": settings.max_tokens_per_request,

@@ -315,6 +315,35 @@ class TestSynthesizerOutput:
         out = SynthesizerOutput(is_answerable=True, sentences=[s])
         assert len(out.sentences) == 1
 
+    def test_duplicate_citation_id_across_sentences_raises(self) -> None:
+        duplicate = "cite_1"
+        s1 = DraftSentence(
+            sentence_id="s_01",
+            text="First fact.",
+            is_cited=True,
+            citations=[
+                Citation(
+                    citation_id=duplicate,
+                    chunk_id="doc_1_chunk_A",
+                    exact_source_quote="First verbatim excerpt.",
+                )
+            ],
+        )
+        s2 = DraftSentence(
+            sentence_id="s_02",
+            text="Second fact.",
+            is_cited=True,
+            citations=[
+                Citation(
+                    citation_id=duplicate,
+                    chunk_id="doc_2_chunk_A",
+                    exact_source_quote="Second verbatim excerpt.",
+                )
+            ],
+        )
+        with pytest.raises(ValidationError, match="globally unique"):
+            SynthesizerOutput(is_answerable=True, sentences=[s1, s2])
+
 
 # ===========================================================================
 # FinalSentence

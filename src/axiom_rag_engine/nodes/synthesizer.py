@@ -94,7 +94,9 @@ characters exactly.
 4. chunk_id MUST be the exact ID from the provided context (format: \
 doc_<N>_chunk_<X>).
 5. sentence_id values must be sequential: s_01, s_02, s_03, ...
-6. citation_id values must be sequential: cite_1, cite_2, cite_3, ...
+6. citation_id values must be globally unique across the entire response and \
+sequential: cite_1, cite_2, cite_3, ... — never restart numbering inside a new \
+sentence.
 7. Do NOT wrap your response in markdown code fences.
 """
 
@@ -303,18 +305,35 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
     model: str = models_cfg.get("synthesizer") or get_settings().default_synthesizer_model
     expertise_level: str = app_cfg.get("expertise_level", "intermediate")
 
-    # Prefer pre-ranked chunks; fall back to all indexed chunks when ranker
-    # produced no results (e.g. all chunks below quality floor).
+    # Prefer pre-ranked chunks; fall back to scored chunks (already sorted by
+    # quality_score), then to raw indexed_chunks. The fallback is capped to
+    # max_ranked_chunks so a skipped ranker never blows the model's context
+    # window — at 200 retriever chunks × ~1.8 KB each, the raw fallback could
+    # otherwise push ~360 KB at the synthesizer.
+    pipeline_cfg: dict = state.get("pipeline_config") or {}
+    stages_cfg: dict = pipeline_cfg.get("stages") or {}
+    max_ranked: int = int(stages_cfg.get("max_ranked_chunks", 10))
+
     ranked_chunks: list[dict] = list(state.get("ranked_chunks") or [])
     if ranked_chunks:
         chunks: list[dict] = ranked_chunks
     else:
-        chunks = list(state.get("indexed_chunks") or [])
+        scored_fallback = list(state.get("scored_chunks") or [])
+        if scored_fallback:
+            chunks = scored_fallback[:max_ranked]
+            fallback_source = "scored_chunks"
+        else:
+            chunks = list(state.get("indexed_chunks") or [])[:max_ranked]
+            fallback_source = "indexed_chunks"
         if chunks:
             audit.append(
                 _audit(
                     "synthesizer_ranked_empty_fallback",
-                    {"indexed_chunk_count": len(chunks)},
+                    {
+                        "fallback_source": fallback_source,
+                        "fallback_chunk_count": len(chunks),
+                        "cap": max_ranked,
+                    },
                 )
             )
 

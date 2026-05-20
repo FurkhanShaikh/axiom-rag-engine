@@ -157,6 +157,24 @@ class SynthesizerOutput(BaseModel):
     )
     sentences: list[DraftSentence] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_globally_unique_citation_ids(self) -> SynthesizerOutput:
+        # Verifier state (mechanical_results, results_map) is keyed by citation_id
+        # alone. Duplicates across sentences would silently overwrite earlier
+        # verifications and map the wrong outcome onto a citation, so we reject
+        # them at the schema boundary — the synthesizer's parse-retry loop will
+        # surface the constraint to the LLM and ask for a corrected response.
+        seen: set[str] = set()
+        for sentence in self.sentences:
+            for citation in sentence.citations:
+                if citation.citation_id in seen:
+                    raise ValueError(
+                        f"citation_id {citation.citation_id!r} appears on more than one "
+                        "sentence; citation IDs must be globally unique across the response."
+                    )
+                seen.add(citation.citation_id)
+        return self
+
 
 # ---------------------------------------------------------------------------
 # VERIFICATION & FINAL OUTPUT MODELS

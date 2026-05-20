@@ -130,6 +130,14 @@ class Settings(BaseSettings):
         default="20/minute",
         description="SlowAPI rate-limit string applied per API key or IP.",
     )
+    stream_rate_limit: str = Field(
+        default="20/minute",
+        description=(
+            "SlowAPI rate-limit string applied per API key or IP for the "
+            "streaming endpoint (/v1/synthesize/stream). Defaults to the same "
+            "limit as ``rate_limit``."
+        ),
+    )
     cache_ttl_seconds: int = Field(
         default=300,
         description="TTL for the in-process response cache.",
