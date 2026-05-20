@@ -549,6 +549,9 @@ class TestAuthMode:
     def test_lifespan_requires_live_search_outside_dev(self, monkeypatch) -> None:
         monkeypatch.setenv("AXIOM_ENV", "production")
         monkeypatch.setenv("AXIOM_API_KEYS", "key-1")
+        # Satisfy the LLM-provider fail-closed check so the lifespan reaches the
+        # TAVILY check this test is asserting on.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
         monkeypatch.delenv("AXIOM_ALLOW_MOCK_SEARCH", raising=False)
 

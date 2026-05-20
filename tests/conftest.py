@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import axiom_rag_engine.main as _main_module
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import Settings, get_settings
 from axiom_rag_engine.main import app
 from axiom_rag_engine.nodes.retriever import MockSearchBackend, set_search_backend
 
@@ -81,14 +81,34 @@ SAMPLE_CHUNKS = [
 # ---------------------------------------------------------------------------
 
 
+_ENV_LEAK_KEYS = (
+    "TAVILY_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "AXIOM_API_KEYS",
+    "AXIOM_AUDIT_RETENTION",
+    "AXIOM_REDIS_URL",
+    "AXIOM_ALLOW_MOCK_SEARCH",
+    "AXIOM_DEFAULT_SYNTHESIZER_MODEL",
+    "AXIOM_DEFAULT_VERIFIER_MODEL",
+)
+
+
 @pytest.fixture(autouse=True)
-def _reset_settings_cache():
-    """Clear the Settings LRU cache before and after every test.
+def _reset_settings_cache(monkeypatch):
+    """Clear the Settings LRU cache and isolate tests from the operator's `.env`.
 
     Settings reads env vars once per instantiation, so tests that use
     `monkeypatch.setenv` need a fresh Settings object to observe the
     override. Autouse guarantees the cache is always clean.
+
+    pydantic-settings additionally loads ``.env`` from the working directory
+    as a separate source from ``os.environ``. Disabling that source for
+    tests ensures the operator's local secrets don't influence assertions.
     """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for key in _ENV_LEAK_KEYS:
+        monkeypatch.delenv(key, raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

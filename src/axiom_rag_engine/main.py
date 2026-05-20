@@ -93,18 +93,25 @@ _SETTINGS_DEFAULT_VERIF = "gpt-4o-mini"
 
 # Ollama model preference order (first match wins)
 _OLLAMA_PREFERENCE = [
-    "qwen3:8b", "qwen3:4b", "qwen3:1.7b",
-    "llama3.2:3b", "llama3:8b",
-    "mistral:7b", "gemma2:9b",
+    "qwen3:8b",
+    "qwen3:4b",
+    "qwen3:1.7b",
+    "llama3.2:3b",
+    "llama3:8b",
+    "mistral:7b",
+    "gemma2:9b",
 ]
 
 
 def _list_ollama_models(base_url: str) -> list[str]:
     """Return available Ollama model names, or [] if Ollama is unreachable."""
-    import urllib.request
     import urllib.error
+    import urllib.request
+
     try:
-        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=2) as resp:
+        with urllib.request.urlopen(  # noqa: S310 — base_url is operator-controlled, http(s) only
+            f"{base_url}/api/tags", timeout=2
+        ) as resp:
             data = json.loads(resp.read())
             return [m["name"] for m in data.get("models", [])]
     except Exception:
@@ -169,13 +176,24 @@ def _resolve_llm_defaults(
         return configured
 
     if not has_anthropic and not has_openai and not has_ollama:
-        raise RuntimeError(
-            "No LLM provider is available. Configure one of:\n"
-            "  • ANTHROPIC_API_KEY  (recommended for production)\n"
-            "  • OPENAI_API_KEY\n"
-            f"  • Ollama running at {settings.ollama_api_base} with at least one model pulled\n"
-            "Or set AXIOM_DEFAULT_SYNTHESIZER_MODEL / AXIOM_DEFAULT_VERIFIER_MODEL explicitly."
+        # Only fail-closed in production. In dev/test envs we fall back to the
+        # configured defaults so the app can boot without provider credentials —
+        # individual requests will surface the missing-key error at call time.
+        if settings.auth_required():
+            raise RuntimeError(
+                "No LLM provider is available. Configure one of:\n"
+                "  • ANTHROPIC_API_KEY  (recommended for production)\n"
+                "  • OPENAI_API_KEY\n"
+                f"  • Ollama running at {settings.ollama_api_base} with at least one model pulled\n"
+                "Or set AXIOM_DEFAULT_SYNTHESIZER_MODEL / AXIOM_DEFAULT_VERIFIER_MODEL explicitly."
+            )
+        logger.warning(
+            "No LLM provider detected; using configured defaults (synth=%s, verif=%s). "
+            "Requests will fail until ANTHROPIC_API_KEY, OPENAI_API_KEY, or Ollama is available.",
+            configured_synth,
+            configured_verif,
         )
+        return configured_synth, configured_verif
 
     synth = _select("synthesizer", operator_set_synth, configured_synth)
     verif = _select("verifier", operator_set_verif, configured_verif)
@@ -188,7 +206,9 @@ def _resolve_llm_defaults(
             configured_synth,
         )
     else:
-        logger.info("Synthesizer model: %s%s", synth, " (operator-configured)" if operator_set_synth else "")
+        logger.info(
+            "Synthesizer model: %s%s", synth, " (operator-configured)" if operator_set_synth else ""
+        )
 
     if verif != configured_verif:
         logger.warning(
@@ -198,10 +218,16 @@ def _resolve_llm_defaults(
             configured_verif,
         )
     else:
-        logger.info("Verifier model: %s%s", verif, " (operator-configured)" if operator_set_verif else "")
+        logger.info(
+            "Verifier model: %s%s", verif, " (operator-configured)" if operator_set_verif else ""
+        )
 
     if has_ollama:
-        logger.info("Ollama reachable at %s — available models: %s", settings.ollama_api_base, ", ".join(ollama_models))
+        logger.info(
+            "Ollama reachable at %s — available models: %s",
+            settings.ollama_api_base,
+            ", ".join(ollama_models),
+        )
     else:
         logger.debug("Ollama not reachable at %s.", settings.ollama_api_base)
 
@@ -959,8 +985,12 @@ async def get_status(request: Request) -> dict[str, Any]:
             "max_concurrent_llm": settings.max_concurrent_llm,
         },
         "models": {
-            "synthesizer_default": getattr(state, "default_synthesizer_model", settings.default_synthesizer_model),
-            "verifier_default": getattr(state, "default_verifier_model", settings.default_verifier_model),
+            "synthesizer_default": getattr(
+                state, "default_synthesizer_model", settings.default_synthesizer_model
+            ),
+            "verifier_default": getattr(
+                state, "default_verifier_model", settings.default_verifier_model
+            ),
         },
         "observability": {
             "log_format": settings.log_format,

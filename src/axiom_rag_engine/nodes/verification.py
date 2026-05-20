@@ -70,8 +70,12 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
     audit: list[dict[str, Any]] = []
     draft_sentences: list[dict] = list(state.get("draft_sentences") or [])
     indexed_chunks: list[dict] = list(state.get("indexed_chunks") or [])
-    logger.debug("_run_verification: draft_sentences=%d indexed_chunks=%d is_answerable=%s",
-                 len(draft_sentences), len(indexed_chunks), state.get("is_answerable"))
+    logger.debug(
+        "_run_verification: draft_sentences=%d indexed_chunks=%d is_answerable=%s",
+        len(draft_sentences),
+        len(indexed_chunks),
+        state.get("is_answerable"),
+    )
     chunk_lookup: dict[str, dict] = {c["chunk_id"]: c for c in indexed_chunks}
 
     audit.append(

@@ -21,6 +21,8 @@ Requires **Python 3.11+** and **[uv](https://docs.astral.sh/uv/)**.
 ```bash
 python tasks.py lint             # ruff + mypy
 python tasks.py test             # pytest with >=70% coverage
+python tasks.py security         # dependency vulnerability scan
+python tasks.py ci               # CI-style pre-push check
 ```
 
 4. Open a pull request against `main`.

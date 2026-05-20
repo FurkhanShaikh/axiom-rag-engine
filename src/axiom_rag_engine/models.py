@@ -9,8 +9,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from axiom_rag_engine.config.settings import get_settings
-
 # ---------------------------------------------------------------------------
 # INPUT MODELS
 # ---------------------------------------------------------------------------

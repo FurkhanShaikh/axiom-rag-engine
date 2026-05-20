@@ -12,6 +12,7 @@ Event ordering guarantee:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -206,7 +207,9 @@ async def stream_pipeline(
                         payload.request_id,
                         type(data.get("output")).__name__,
                         list(output.keys()) if isinstance(output, dict) else "N/A",
-                        len(output.get("final_sentences") or []) if isinstance(output, dict) else -1,
+                        len(output.get("final_sentences") or [])
+                        if isinstance(output, dict)
+                        else -1,
                         len(accumulated.get("draft_sentences") or []),
                     )
 
@@ -270,14 +273,12 @@ async def stream_pipeline(
         )
         return
     except Exception as exc:
-        try:
+        with contextlib.suppress(Exception):
             logger.exception(
                 "Unhandled pipeline error for request %s: %s",
                 payload.request_id,
                 ascii(str(exc)),
             )
-        except Exception:
-            pass
         yield _sse(
             "error",
             {
@@ -300,7 +301,9 @@ async def stream_pipeline(
     )
     if final_sentences:
         first = final_sentences[0].get("verification", {})
-        logger.debug("First sentence tier=%s mech=%s", first.get("tier"), first.get("mechanical_check"))
+        logger.debug(
+            "First sentence tier=%s mech=%s", first.get("tier"), first.get("mechanical_check")
+        )
     usage_snapshot = get_llm_usage_snapshot()
     response = marshal_response(
         payload.request_id,
@@ -319,8 +322,6 @@ async def stream_pipeline(
 
     # -- post-complete hook (cache, metrics, audit) before terminal frame --
     if on_complete is not None:
-        import contextlib
-
         with contextlib.suppress(Exception):
             await on_complete(response, accumulated)
 

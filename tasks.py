@@ -12,6 +12,10 @@ Quick start for new users:
     python tasks.py run                            # start the server (separate terminal)
     python tasks.py probe "your question"          # send a test query
     python tasks.py probe "your question" --debug  # include audit trail
+
+CI parity:
+    python tasks.py security                       # run dependency vulnerability scan
+    python tasks.py ci                             # run local CI checks before pushing
 """
 
 import json
@@ -27,7 +31,11 @@ _SERVER_URL = "http://localhost:8000"
 
 
 def _run(*cmd: str) -> None:
-    subprocess.run(cmd, check=True)  # noqa: S603
+    try:
+        subprocess.run(cmd, check=True)  # noqa: S603
+    except subprocess.CalledProcessError as exc:
+        _echo(f"\nCommand failed ({exc.returncode}): {' '.join(cmd)}")
+        sys.exit(exc.returncode)
 
 
 def _echo(message: str = "") -> None:
@@ -52,9 +60,10 @@ def install() -> None:
 def run() -> None:
     """Start the FastAPI development server at http://localhost:8000."""
     import os
+
     env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    subprocess.run(  # noqa: S603
-        ["uv", "run", "uvicorn", "axiom_rag_engine.main:app", "--reload"],
+    subprocess.run(
+        ["uv", "run", "uvicorn", "axiom_rag_engine.main:app", "--reload"],  # noqa: S607
         check=True,
         env=env,
     )
@@ -70,6 +79,31 @@ def lint() -> None:
     _run("uv", "run", "ruff", "check", ".")
     _run("uv", "run", "ruff", "format", "--check", ".")
     _run("uv", "run", "mypy", "src")
+
+
+def security() -> None:
+    """Run the same dependency vulnerability scan used by CI."""
+    _run("uv", "sync", "--frozen")
+    _run("uv", "run", "pip-audit")
+
+
+def ci() -> None:
+    """Run CI-style checks locally: lint, types, tests, security, and Docker build."""
+    _run("uv", "sync", "--frozen")
+    _run("uv", "run", "ruff", "check", ".")
+    _run("uv", "run", "ruff", "format", "--check", ".")
+    _run("uv", "run", "mypy", "src")
+    _run(
+        "uv",
+        "run",
+        "pytest",
+        "-m",
+        "not integration",
+        "--cov=axiom_rag_engine",
+        "--cov-report=term-missing",
+    )
+    _run("uv", "run", "pip-audit")
+    _run("docker", "build", "-t", "axiom-rag-engine:ci", ".")
 
 
 def format() -> None:

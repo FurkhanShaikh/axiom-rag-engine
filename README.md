@@ -199,6 +199,8 @@ curl -fsS http://localhost:8000/v1/status | jq .
 ```bash
 python tasks.py test             # unit tests (>=70% coverage required)
 python tasks.py lint             # ruff + mypy
+python tasks.py security         # dependency vulnerability scan
+python tasks.py ci               # CI-style pre-push check
 python tasks.py format           # auto-format
 python tasks.py clean            # remove caches + venv
 ```
