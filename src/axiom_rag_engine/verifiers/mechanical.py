@@ -5,13 +5,17 @@ Deterministic citation integrity checker. No LLM involved.
 
 Algorithm:
   1. Normalize both the full chunk and the LLM-supplied quote:
-       - Expand/replace Unicode punctuation and smart quotes to ASCII equivalents
-       - Lowercase
-       - Strip all remaining punctuation
+       - Expand/replace common Unicode punctuation and smart quotes
+       - NFKD-decompose, then drop combining marks (accents, Arabic harakat),
+         punctuation, symbols, and invisible format characters
+       - Casefold
        - Collapse all whitespace to a single space and strip edges
+     Letters and digits from every script are preserved, so non-Latin content
+     (Arabic, CJK, Cyrillic, ...) remains verifiable.
   2. Require the normalized quote to have at least _MIN_NORMALIZED_TOKENS
-     significant tokens (post-normalization word count). Short fragments like
-     "the sky" match too liberally and provide no citation integrity guarantee.
+     significant tokens, or _MIN_NORMALIZED_CHARS characters for scripts that
+     do not use spaces (CJK). Short fragments like "the sky" match too
+     liberally and provide no citation integrity guarantee.
   3. Check whether the normalized quote is a substring of the normalized chunk.
   4. If YES → passed
      If NO  → failed  (tier=5, Hallucinated Citation)
@@ -20,16 +24,18 @@ Algorithm:
 from __future__ import annotations
 
 import re
-import string
 import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
 # ---------------------------------------------------------------------------
-# Minimum quote length (in normalized tokens) to accept a "passed" verdict.
-# A quote normalized to fewer tokens is too short to meaningfully verify.
+# Minimum quote length to accept a "passed" verdict. The token floor governs
+# space-separated scripts; the character floor is the fallback for unspaced
+# scripts (CJK), where whitespace tokenization would always yield one token.
+# A quote clears the guard by meeting EITHER floor.
 # ---------------------------------------------------------------------------
 _MIN_NORMALIZED_TOKENS = 4
+_MIN_NORMALIZED_CHARS = 12
 
 # ---------------------------------------------------------------------------
 # Unicode → ASCII mapping for common LLM tokenization artifacts
@@ -67,8 +73,16 @@ _UNICODE_SUBSTITUTIONS: dict[str, str] = {
 
 _UNICODE_SUBSTITUTION_TABLE = str.maketrans(_UNICODE_SUBSTITUTIONS)
 
-# Pre-compiled punctuation stripper: removes every character in string.punctuation
-_PUNCTUATION_RE = re.compile(r"[" + re.escape(string.punctuation) + r"]")
+# Unicode general categories removed during normalization:
+#   P* — punctuation (all scripts, superset of string.punctuation's P entries)
+#   S* — symbols ($, +, <, =, >, ^, `, |, ~ are category S, not P)
+#   Mn — nonspacing combining marks (Latin accents, Arabic harakat) after NFKD
+#   Cf — invisible format characters (ZWJ/ZWNJ, directional marks)
+# Letters (L*), digits (N*), and whitespace survive; whitespace is collapsed
+# in a later step. Cc (control) is NOT removed here because \t and \n must
+# survive until whitespace collapsing.
+_REMOVED_CATEGORY_PREFIXES = ("P", "S")
+_REMOVED_CATEGORIES = ("Mn", "Cf")
 
 # Pre-compiled whitespace collapser
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -80,8 +94,8 @@ class MechanicalVerificationResult:
     Immutable result returned by MechanicalVerifier.verify().
 
     Attributes:
-        status:      "passed" if the quote exists within a single source
-                     sentence; "failed" otherwise.
+        status:      "passed" if the normalized quote is a substring of the
+                     normalized chunk; "failed" otherwise.
         tier:        None on pass. 5 (Hallucinated) on failure.
         audit_proof: Dict suitable for direct insertion into the audit_trail state.
     """
@@ -145,16 +159,19 @@ class MechanicalVerifier:
                 failure_reason="Quote is empty after normalization.",
             )
 
-        # Minimum token guard — reject trivially short quotes.
+        # Minimum length guard — reject trivially short quotes. Either floor
+        # suffices: the character floor keeps unspaced scripts (CJK) verifiable,
+        # since whitespace tokenization collapses them to a single "token".
         quote_token_count = len(norm_quote.split())
-        if quote_token_count < _MIN_NORMALIZED_TOKENS:
+        if quote_token_count < _MIN_NORMALIZED_TOKENS and len(norm_quote) < _MIN_NORMALIZED_CHARS:
             return self._failure(
                 chunk_id=chunk_id,
                 raw_quote=llm_quote,
                 norm_quote=norm_quote,
                 failure_reason=(
                     f"Quote is too short after normalization "
-                    f"({quote_token_count} tokens < {_MIN_NORMALIZED_TOKENS} required)."
+                    f"({quote_token_count} tokens < {_MIN_NORMALIZED_TOKENS} required "
+                    f"and {len(norm_quote)} chars < {_MIN_NORMALIZED_CHARS} required)."
                 ),
             )
 
@@ -192,17 +209,27 @@ class MechanicalVerifier:
         LLM-supplied quote before substring comparison.
 
         Steps:
-          1. Apply Unicode → ASCII substitution table (smart quotes, dashes, etc.)
-          2. NFKD decomposition + ASCII encoding to strip combining diacritics and
-             homoglyph variants not covered by the substitution table.
-          3. Lowercase.
-          4. Strip all ASCII punctuation.
-          5. Collapse all whitespace sequences to a single space and strip edges.
+          1. Apply Unicode substitution table (smart quotes, dashes, etc.)
+          2. NFKD decomposition, then drop combining marks (Latin accents,
+             Arabic harakat), punctuation, symbols, and format characters by
+             Unicode category. Base letters and digits from every script are
+             preserved — non-Latin text stays verifiable (the previous ASCII
+             coercion deleted Arabic/CJK/Cyrillic content entirely, making
+             every citation from such sources fail as Tier 5).
+          3. Casefold.
+          4. Collapse all whitespace sequences to a single space and strip edges.
         """
         text = text.translate(_UNICODE_SUBSTITUTION_TABLE)
-        text = unicodedata.normalize("NFKD", text).encode("ascii", errors="ignore").decode("ascii")
-        text = text.lower()
-        text = _PUNCTUATION_RE.sub("", text)
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(
+            ch
+            for ch in text
+            if not (
+                (cat := unicodedata.category(ch)).startswith(_REMOVED_CATEGORY_PREFIXES)
+                or cat in _REMOVED_CATEGORIES
+            )
+        )
+        text = text.casefold()
         text = _WHITESPACE_RE.sub(" ", text).strip()
         return text
 

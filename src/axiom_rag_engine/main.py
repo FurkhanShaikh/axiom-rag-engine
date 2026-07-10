@@ -46,6 +46,7 @@ from slowapi.util import get_remote_address
 from axiom_rag_engine.api.auth import (
     _api_keys,
     _auth_required,
+    is_valid_api_key,
     verify_api_key,
 )
 from axiom_rag_engine.api.sse import stream_pipeline
@@ -305,11 +306,13 @@ def rate_limit_key(request: Request) -> str:
 
     Prefer a hashed API key so one key shared across many IPs still hits a
     single bucket (previously the IP-based key let an attacker bypass limits
-    by spraying source addresses). Fall back to the real client IP for
-    unauthenticated callers.
+    by spraying source addresses). Only *valid* keys get a key bucket:
+    bucketing on the raw header would let a client mint a fresh bucket per
+    request by rotating random X-API-Key values, bypassing the IP limit
+    entirely. Invalid or missing keys fall back to the real client IP.
     """
     api_key = request.headers.get("X-API-Key")
-    if api_key:
+    if api_key and is_valid_api_key(api_key):
         return "key:" + hashlib.sha256(api_key.encode()).hexdigest()[:32]
     return "ip:" + get_real_ip(request)
 
@@ -765,9 +768,10 @@ async def synthesize_stream(
     Sentences appear in ``sentence`` frames only **after** they clear
     verification — unverified text never reaches the client.
 
-    Disconnect recovery: if the client drops mid-stream the pipeline continues
-    to completion server-side and the full audit trail is persisted and
-    retrievable via ``GET /v1/audits/{request_id}``.
+    Disconnect behavior: if the client drops mid-stream the pipeline is
+    cancelled — in-flight LLM calls are unwound and no further budget is
+    consumed. Audit trails, metrics, and cache writes happen only for runs
+    that stream to completion.
     """
     request_id_ctx.set(payload.request_id)
     effective_app_config = _effective_app_config(payload)

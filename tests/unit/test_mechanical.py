@@ -217,6 +217,68 @@ class TestTokenizationArtifactsCausePass:
 
 
 # ===========================================================================
+# C2. Non-Latin scripts — must remain verifiable (Unicode-aware normalization)
+# ===========================================================================
+
+
+class TestUnicodeScripts:
+    """
+    Normalization must preserve letters and digits from every script. The
+    previous ASCII coercion deleted Arabic/CJK/Cyrillic content entirely,
+    making every citation from such sources fail as a false Tier 5.
+    """
+
+    def test_arabic_verbatim_quote_passes(self, verifier: MechanicalVerifier) -> None:
+        chunk = "العاصمة الفرنسية هي باريس وتقع على نهر السين في شمال البلاد."
+        quote = "العاصمة الفرنسية هي باريس"
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "passed"
+
+    def test_arabic_diacritics_are_normalized_away(self, verifier: MechanicalVerifier) -> None:
+        # Chunk carries harakat (combining marks, category Mn); the LLM quote
+        # omits them — a faithful quote must still verify.
+        chunk = "الْعِلْمُ نُورٌ وَالْجَهْلُ ظَلَامٌ كما قال الحكماء قديما"
+        quote = "العلم نور والجهل ظلام"
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "passed"
+
+    def test_cjk_quote_passes_via_char_floor(self, verifier: MechanicalVerifier) -> None:
+        # Chinese has no spaces: whitespace tokenization yields one "token",
+        # so the character floor must carry the minimum-length guard.
+        chunk = "巴黎是法国的首都，也是法国最大的城市，位于塞纳河畔。"
+        quote = "巴黎是法国的首都，也是法国最大的城市"
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "passed"
+
+    def test_cjk_short_quote_still_fails(self, verifier: MechanicalVerifier) -> None:
+        chunk = "巴黎是法国的首都，也是法国最大的城市。"
+        result = verifier.verify("doc_1_chunk_A", chunk, "巴黎是首都")
+        assert result.status == "failed"
+        assert "too short" in result.audit_proof["failure_reason"].lower()
+
+    def test_cyrillic_verbatim_quote_passes(self, verifier: MechanicalVerifier) -> None:
+        chunk = "Париж является столицей Франции и крупнейшим городом страны."
+        quote = "Париж является столицей Франции"
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "passed"
+
+    def test_arabic_fabricated_quote_fails(self, verifier: MechanicalVerifier) -> None:
+        chunk = "العاصمة الفرنسية هي باريس وتقع على نهر السين في شمال البلاد."
+        quote = "عاصمة ألمانيا هي برلين الكبرى"  # fabricated — not in chunk
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "failed"
+        assert result.tier == 5
+
+    def test_latin_accents_still_fold(self, verifier: MechanicalVerifier) -> None:
+        # Pre-existing behavior that must survive: é decomposes to e + combining
+        # acute (Mn), so an accent-stripped quote still matches.
+        chunk = "The café serves fresh croissants every morning."
+        quote = "cafe serves fresh croissants"
+        result = verifier.verify("doc_1_chunk_A", chunk, quote)
+        assert result.status == "passed"
+
+
+# ===========================================================================
 # D. Hallucination cases — must FAIL (Tier 5)
 # ===========================================================================
 

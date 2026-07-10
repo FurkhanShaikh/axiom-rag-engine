@@ -74,7 +74,17 @@ class RedisCacheBackend:
     def __init__(self, redis_url: str, ttl_seconds: int = 300) -> None:
         import redis  # Lazy import to avoid hard dependency
 
-        self._redis = redis.Redis.from_url(redis_url, decode_responses=True)
+        # This client is synchronous and get/set run on the event loop, so a
+        # hung Redis must fail fast: without socket timeouts an outage would
+        # stall every request in the process, not just cache lookups. Timeouts
+        # surface as redis.TimeoutError (a RedisError), which get/set already
+        # treat as a cache miss.
+        self._redis = redis.Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+        )
         self.ttl = ttl_seconds
 
     def _prefixed(self, key: str) -> str:

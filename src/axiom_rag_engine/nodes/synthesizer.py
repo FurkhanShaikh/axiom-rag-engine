@@ -308,7 +308,7 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
     # Prefer pre-ranked chunks; fall back to scored chunks (already sorted by
     # quality_score), then to raw indexed_chunks. The fallback is capped to
     # max_ranked_chunks so a skipped ranker never blows the model's context
-    # window — at 200 retriever chunks × ~1.8 KB each, the raw fallback could
+    # window — at 200 retriever chunks x ~1.8 KB each, the raw fallback could
     # otherwise push ~360 KB at the synthesizer.
     pipeline_cfg: dict = state.get("pipeline_config") or {}
     stages_cfg: dict = pipeline_cfg.get("stages") or {}

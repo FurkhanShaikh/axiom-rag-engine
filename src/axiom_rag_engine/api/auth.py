@@ -66,6 +66,19 @@ def _hashed_key_check(presented: str, valid_keys: set[str]) -> bool:
     return matched
 
 
+def is_valid_api_key(presented: str) -> bool:
+    """Return True when ``presented`` matches a configured API key.
+
+    Non-raising variant of the ``verify_api_key`` check, for callers that need
+    a boolean (e.g. rate-limit bucketing) rather than an HTTP 401. Returns
+    False when no keys are configured.
+    """
+    valid_keys = _api_keys()
+    if not valid_keys:
+        return False
+    return _hashed_key_check(presented, valid_keys)
+
+
 async def verify_api_key(
     api_key: str | None = Security(_api_key_header),
 ) -> str | None:

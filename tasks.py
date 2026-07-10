@@ -197,6 +197,28 @@ def probe() -> None:
             _echo(f"    [{event['node']}] {event['event_type']}: {payload_str}")
 
 
+def evals() -> None:
+    """Run quality evals against the live pipeline (see evals/README.md).
+
+    Usage:
+        python tasks.py evals download                                # fetch datasets
+        python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
+        python tasks.py evals e2e -- --model ollama/qwen3:8b
+        python tasks.py evals e2e -- --validate-only                  # no LLM needed
+    """
+    args = sys.argv[2:]
+    scripts = {
+        "download": "evals/download_datasets.py",
+        "semantic": "evals/semantic_verifier_eval.py",
+        "e2e": "evals/e2e_eval.py",
+    }
+    if not args or args[0] not in scripts:
+        _echo("Usage: python tasks.py evals <download|semantic|e2e> [-- <args>]")
+        sys.exit(1)
+    passthrough = [a for a in args[1:] if a != "--"]
+    _run("uv", "run", "python", scripts[args[0]], *passthrough)
+
+
 def clean() -> None:
     """Remove the virtual environment and all caches."""
     for name in (".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"):

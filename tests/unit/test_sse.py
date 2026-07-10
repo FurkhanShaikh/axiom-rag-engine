@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -168,6 +169,54 @@ async def test_stream_pipeline_emits_stage_events_in_order() -> None:
     stage_frames = [f for f in frames if f["type"] == "stage"]
     stages_in_order = [f["stage"] for f in stage_frames if f["phase"] == "start"]
     assert stages_in_order == node_seq
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_cancels_inflight_pipeline() -> None:
+    """A dropped client must cancel the in-flight engine iteration.
+
+    Starlette tears down the response by cancelling the task that iterates the
+    generator and then closing it. The generator's cleanup must propagate that
+    cancellation into the pending ``astream_events`` step — otherwise the
+    abandoned pipeline task leaks and keeps burning LLM budget with no reader.
+    """
+    import contextlib
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _astream_events(state, *, version):
+        yield _langgraph_event("on_chain_start", "retriever")
+        started.set()
+        try:
+            await asyncio.sleep(3600)  # simulate a long in-flight LLM call
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        yield _langgraph_event("on_chain_end", "retriever", {})
+
+    engine = MagicMock()
+    engine.astream_events = _astream_events
+
+    gen = stream_pipeline(
+        _make_payload(),
+        engine=engine,
+        initial_state={"request_id": "test-001", "audit_trail": []},  # type: ignore[arg-type]
+    )
+    await gen.__anext__()  # accepted frame
+    await gen.__anext__()  # retriever stage-start frame
+
+    # Resume the generator in a task; it parks on the blocked engine step.
+    consumer = asyncio.ensure_future(gen.__anext__())
+    await started.wait()
+    # Simulate the disconnect: Starlette cancels the consuming task, then
+    # closes the generator.
+    consumer.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await consumer
+    await gen.aclose()
+
+    assert cancelled.is_set(), "engine iteration was not cancelled on client disconnect"
 
 
 @pytest.mark.asyncio

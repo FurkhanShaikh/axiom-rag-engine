@@ -1,0 +1,95 @@
+# Axiom Engine Evals
+
+Measures whether the verification pipeline actually does what it claims —
+as opposed to the unit suite, which measures whether the code does what the
+code says. Run these before and after any change to prompts, models,
+normalization, ranking, or tier logic.
+
+## Layers
+
+| Layer | Script | Dataset | What it measures |
+|---|---|---|---|
+| 1 | `semantic_verifier_eval.py` | [SciFact](https://github.com/allenai/scifact) (dev split) | Semantic verifier accuracy: does it pass SUPPORTed claims and fail CONTRADICTed ones? |
+| 2 | `e2e_eval.py` | `golden/seed.jsonl` (committed, hand-curated) | Full pipeline behavior: answerability, tier assignment, Tier-5 leakage, non-Latin support |
+
+### Why SciFact for Layer 1
+
+The semantic verifier's job — "does this claim faithfully represent this
+quote in the context of this chunk?" — is exactly the claim-vs-evidence
+entailment task. SciFact provides ~450 expert-annotated scientific claims
+with labeled evidence sentences (SUPPORT / CONTRADICT) inside full
+abstracts, which map directly onto (claim, exact_source_quote, chunk_text).
+It is small, clean, and downloadable without extra dependencies.
+
+Expansion candidates (not yet wired):
+- **LLM-AggreFact** (HuggingFace) — aggregation of 10+ grounding datasets
+  incl. RAGTruth and WiCE; much larger and more diverse than SciFact.
+- **ALCE / ASQA** — questions with pinned retrieval passages; would let
+  Layer 2 run on a standard corpus instead of only the golden seed.
+- **CRAG** — web-flavored RAG QA with hallucination-aware scoring.
+
+### Why a hand-curated golden set for Layer 2
+
+No public benchmark exercises Axiom's specific contract (verbatim-quote
+citations, six-tier rollup, unanswerable escape hatch, mock search
+injection). The seed set is small but *diagnostic* — each case exists to
+catch a specific regression class (see comments in `golden/seed.jsonl`).
+
+## Running
+
+```bash
+# One-time: fetch SciFact (~3 MB) into evals/data/ (gitignored)
+python tasks.py evals download
+
+# Layer 1 — semantic verifier accuracy (needs an LLM; ~1-2k tokens/example)
+python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
+python tasks.py evals semantic -- --model ollama/qwen3:8b --limit 20
+
+# Layer 2 — end-to-end golden set (needs an LLM)
+python tasks.py evals e2e -- --model gpt-4o-mini
+
+# Layer 2 without any LLM: validates seed schema + runs the deterministic
+# retriever/scorer/ranker stages and reports the pre-LLM answerability gate
+python tasks.py evals e2e -- --validate-only
+```
+
+Results are written to `evals/results/<eval>-<timestamp>.json` (gitignored)
+with one record per example, so failures can be inspected and diffed
+between runs.
+
+## Metrics
+
+**Layer 1 (semantic verifier)** — positive class = "unfaithful detected"
+(CONTRADICT → semantic_check=failed):
+
+- `accuracy` — overall agreement with SciFact labels
+- `precision` / `recall` / `f1` — for the unfaithful class. Low recall means
+  misrepresentations slip through (Tier 4 misses); low precision means
+  faithful claims get bounced into rewrite loops (wasted LLM budget).
+- `error_rate` — examples where the verifier LLM failed to produce a verdict
+
+**Layer 2 (end-to-end)** — per-case expectation checks:
+
+- `answerable` matches, `status` within expected set
+- `max_tier5_sentences` — Tier-5 leakage into the final response
+- `min_overall_score` — confidence floor for answerable cases
+- Aggregate: expectation pass rate, tier distribution, mechanical
+  false-negative proxy (Tier-5 rate on cases whose corpus verifiably
+  supports the answer)
+
+## Interpreting results
+
+These evals are informative, not CI-gating (they need LLM keys and cost
+money). Treat the numbers as a baseline: record them before a change,
+re-run after, and investigate any metric that moves more than a few points.
+Small local models (Ollama) will score lower on Layer 1 than cloud
+models — compare like against like.
+
+## Known measurement gaps
+
+- The ranker tokenizes `[a-z0-9]+` only, so BM25 relevance is 0 for
+  non-Latin queries — such cases rank on quality score alone. The Arabic
+  golden case exercises this path deliberately.
+- Tier calibration (does Tier 1 correlate with actual correctness?) needs
+  labeled answer correctness, which the seed set is too small to provide.
+  That arrives with ALCE/ASQA integration.

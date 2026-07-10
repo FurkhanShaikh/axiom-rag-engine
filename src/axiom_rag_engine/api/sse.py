@@ -149,9 +149,10 @@ async def stream_pipeline(
     async def _next(iterator: Any) -> Any:
         return await iterator.__anext__()
 
+    pending_event: asyncio.Task[Any] | None = None
+    timeout_task: asyncio.Task[Any] | None = None
     try:
         it = engine.astream_events(initial_state, version="v2").__aiter__()
-        pending_event: asyncio.Task[Any] | None = None
         while True:
             if pending_event is None:
                 pending_event = asyncio.ensure_future(_next(it))
@@ -163,9 +164,11 @@ async def stream_pipeline(
             )
             if pending_event not in done:
                 timeout_task.cancel()
+                timeout_task = None
                 yield ": keepalive\n\n"
                 continue
             timeout_task.cancel()
+            timeout_task = None
             try:
                 event = pending_event.result()
             except StopAsyncIteration:
@@ -290,6 +293,18 @@ async def stream_pipeline(
             _next_id(),
         )
         return
+    finally:
+        # A client disconnect closes this generator at whichever yield it is
+        # suspended on (GeneratorExit), which the except clauses above do not
+        # catch. Cancel the in-flight __anext__ task so the underlying
+        # LangGraph run is unwound instead of leaking as a destroyed-pending
+        # task that keeps burning LLM budget with no reader.
+        if timeout_task is not None:
+            timeout_task.cancel()
+        if pending_event is not None and not pending_event.done():
+            pending_event.cancel()
+            with contextlib.suppress(BaseException):
+                await pending_event
 
     # -- marshal final response --
     final_sentences = accumulated.get("final_sentences") or []

@@ -561,3 +561,63 @@ class TestAuthMode:
 
         with pytest.raises(RuntimeError, match="TAVILY_API_KEY"):
             asyncio.run(_run())
+
+
+class TestRateLimitKey:
+    """Rate-limit bucket selection (main.rate_limit_key).
+
+    Only *valid* API keys may claim a key-scoped bucket. Bucketing on the raw
+    header would let an attacker mint a fresh bucket per request by rotating
+    random X-API-Key values, bypassing the IP-based limit entirely.
+    """
+
+    @staticmethod
+    def _make_request(headers: dict[str, str], client_ip: str = "203.0.113.7"):
+        from fastapi import Request
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/synthesize",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": (client_ip, 54321),
+            "query_string": b"",
+        }
+        return Request(scope)
+
+    def test_valid_key_gets_key_bucket(self, monkeypatch) -> None:
+        monkeypatch.setenv("AXIOM_API_KEYS", "real-key-1,real-key-2")
+        request = self._make_request({"X-API-Key": "real-key-2"})
+        assert _main_module.rate_limit_key(request).startswith("key:")
+
+    def test_invalid_key_falls_back_to_ip_bucket(self, monkeypatch) -> None:
+        monkeypatch.setenv("AXIOM_API_KEYS", "real-key-1")
+        request = self._make_request({"X-API-Key": "made-up-key"})
+        assert _main_module.rate_limit_key(request) == "ip:203.0.113.7"
+
+    def test_rotating_invalid_keys_share_one_ip_bucket(self, monkeypatch) -> None:
+        monkeypatch.setenv("AXIOM_API_KEYS", "real-key-1")
+        buckets = {
+            _main_module.rate_limit_key(self._make_request({"X-API-Key": f"spoof-{i}"}))
+            for i in range(5)
+        }
+        assert buckets == {"ip:203.0.113.7"}
+
+    def test_missing_key_uses_ip_bucket(self, monkeypatch) -> None:
+        monkeypatch.setenv("AXIOM_API_KEYS", "real-key-1")
+        request = self._make_request({})
+        assert _main_module.rate_limit_key(request) == "ip:203.0.113.7"
+
+    def test_dev_mode_without_configured_keys_uses_ip_bucket(self, monkeypatch) -> None:
+        # No keys configured (dev): arbitrary X-API-Key values must not mint
+        # per-key buckets — everything from one IP shares one bucket.
+        monkeypatch.delenv("AXIOM_API_KEYS", raising=False)
+        request = self._make_request({"X-API-Key": "anything-goes"})
+        assert _main_module.rate_limit_key(request) == "ip:203.0.113.7"
+
+    def test_distinct_valid_keys_get_distinct_buckets(self, monkeypatch) -> None:
+        monkeypatch.setenv("AXIOM_API_KEYS", "real-key-1,real-key-2")
+        bucket_1 = _main_module.rate_limit_key(self._make_request({"X-API-Key": "real-key-1"}))
+        bucket_2 = _main_module.rate_limit_key(self._make_request({"X-API-Key": "real-key-2"}))
+        assert bucket_1 != bucket_2
+        assert bucket_1.startswith("key:") and bucket_2.startswith("key:")
