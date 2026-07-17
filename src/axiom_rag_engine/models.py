@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Pydantic V2 Data Models
+Axiom Engine — Pydantic V2 Data Models
 All I/O contracts for the API Gateway and the LangGraph DAG.
 """
 
@@ -180,20 +180,24 @@ class SynthesizerOutput(BaseModel):
 # VERIFICATION & FINAL OUTPUT MODELS
 # ---------------------------------------------------------------------------
 
-# Verification tier semantics (doc §4):
-#   1 Authoritative  — mechanical + semantic pass; source is a primary official document
-#                      (government body, official spec, platform docs).
-#                      Tertiary sources (Wikipedia, arXiv) cannot reach Tier 1.
-#   2 Consensus      — mechanical + semantic pass; citations span ≥2 distinct domains.
-#                      NOTE: this is multi-domain coverage, NOT an agreement check.
-#                      Pairwise NLI / contradiction detection is not yet implemented;
-#                      Tier 2 should be read as "multi-source" until that ships.
+# Verification tier semantics. Each tier states exactly what was checked.
+#
+#   1 Authoritative  — mechanical + semantic pass; ≥1 cited domain is on the
+#                      configured primary-source list (government body, official
+#                      spec, platform docs). Tertiary sources (Wikipedia, arXiv)
+#                      cannot reach Tier 1.
+#   2 Multi-Domain   — mechanical + semantic pass; citations span ≥2 distinct
+#                      domains. This is coverage, NOT corroboration: the sources
+#                      are never compared against each other, so Tier 2 does not
+#                      mean they agree. Cross-source entailment is not
+#                      implemented — do not describe this tier as "consensus".
 #   3 Model Assisted — mechanical pass; semantic check passed or disabled.
 #   4 Misrepresented — mechanical pass; semantic fail (context stripped/inverted).
-#   5 Hallucinated   — mechanical fail (quote does not exist in any source sentence).
-#   6 Conflicted     — NOT YET IMPLEMENTED. Requires pairwise NLI contradiction
-#                      detection across citation pairs. Reserved for future use;
-#                      the verifier will never currently assign this tier.
+#   5 Hallucinated   — mechanical fail (quote does not exist in the cited chunk).
+#   6 Conflicted     — NOT IMPLEMENTED. Reserved for cross-source contradiction
+#                      detection. The verifier never assigns this tier today; it
+#                      remains in the schema so the contract is stable when it
+#                      ships. Treat any Tier 6 in a response as a bug.
 
 VerificationTier = Literal[1, 2, 3, 4, 5, 6]
 
@@ -237,10 +241,29 @@ class VerificationResult(BaseModel):
         return self
 
 
+class CitationSource(BaseModel):
+    """Provenance of a citation's chunk, resolved server-side from chunk_id.
+
+    Never populated from LLM output — the synthesizer cannot fabricate a URL.
+    Extended in later versions with corpus anchors (document id, page).
+    """
+
+    url: str = ""
+    title: str = ""
+    domain: str = ""
+
+
 class VerifiedCitation(Citation):
     """A citation annotated with verification outcome."""
 
     verification: VerificationResult
+    source: CitationSource | None = Field(
+        default=None,
+        description=(
+            "Where the cited chunk came from. None when the chunk_id could not "
+            "be resolved (e.g. the citation referenced a nonexistent chunk)."
+        ),
+    )
 
 
 class FinalSentence(BaseModel):

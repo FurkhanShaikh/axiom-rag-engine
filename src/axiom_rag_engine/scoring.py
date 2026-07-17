@@ -12,11 +12,11 @@ from axiom_rag_engine.models import ConfidenceSummary, TierBreakdown
 
 # Tier weights for the overall confidence score (architecture §4):
 #   Tier 1 (Authoritative)    → 1.0
-#   Tier 2 (Multi-Source)     → 0.85
+#   Tier 2 (Multi-Domain)     → 0.85
 #   Tier 3 (Model Assisted)   → 0.60
 #   Tier 4 (Misrepresented)   → 0.20  (should rarely survive to final output)
 #   Tier 5 (Hallucinated)     → 0.00  (should never survive to final output)
-#   Tier 6 (Conflicted)       → 0.40
+#   Tier 6 (Conflicted)       → 0.40  (unreachable — never assigned today)
 _TIER_WEIGHTS: dict[int, float] = {
     1: 1.0,
     2: 0.85,

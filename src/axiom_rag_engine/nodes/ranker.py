@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Relevance Ranker (Module 5)
+Axiom Engine — Relevance Ranker (Module 5)
 
 Responsibilities:
   - Ranks scored_chunks by relevance to the user query using BM25-inspired

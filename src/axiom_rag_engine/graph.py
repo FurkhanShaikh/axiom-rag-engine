@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — LangGraph DAG Compilation (The Engine Core)
+Axiom Engine — LangGraph DAG Compilation (The Engine Core)
 
 Wires the nodes and conditional edges into an executable StateGraph.
 

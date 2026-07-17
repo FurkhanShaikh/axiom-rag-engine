@@ -1,10 +1,16 @@
 # Axiom Engine
 
-**Citation-verified RAG with 6-tier confidence scoring.**
+**Citation-verified RAG with 5-tier confidence scoring.**
 
 Axiom Engine is a retrieval-augmented generation (RAG) service that
-verifies every cited claim before presenting answers. Each claim is assigned
-a confidence tier (1-6) based on deterministic + semantic verification.
+verifies every cited claim before presenting answers. Every claim carries a
+verbatim source quote that is checked against the retrieved page
+deterministically, then judged for faithfulness by a model, and assigned a
+confidence tier.
+
+A sixth tier (Conflicted) is defined in the response schema but is **not
+implemented** — the verifier never assigns it today. See
+[Verification tiers](#verification-tiers).
 
 ## Install
 
@@ -59,7 +65,7 @@ resolved configuration.
 | `AXIOM_ENV` | `production` | Runtime environment. Set to `development` to disable auth. |
 | `AXIOM_API_KEYS` | _(empty)_ | Comma-separated API keys. Required when env != development. |
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
-| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-sonnet-4-5` | LiteLLM model ID for synthesis. |
+| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
 | `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |
 | `AXIOM_CACHE_TTL_SECONDS` | `300` | Response cache TTL. |
@@ -67,6 +73,8 @@ resolved configuration.
 | `AXIOM_CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins. |
 | `AXIOM_DOCS_ENABLED` | `true` | Set `false` to disable /docs and /redoc. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
+| `AXIOM_FETCH_FULL_PAGES` | `true` | Verify citations against full page text rather than search snippets. See [Verification sources](#verification-sources). |
+| `AXIOM_MAX_RAW_CONTENT_CHARS` | `200000` | Per-document cap on full page text. Oversized pages are truncated, not dropped. |
 | `AXIOM_AUDIT_RETENTION` | `0` | Retain the last N audit trails in memory for `/v1/audits/{id}`. |
 | `AXIOM_LOG_AUDIT_EVENTS` | `false` | Emit each audit event as a structured log line. |
 | `LOG_FORMAT` | `text` | `json` for structured log output. |
@@ -92,14 +100,49 @@ retriever -> scorer -> ranker -> synthesizer -> verifier -+
 
 ## Verification tiers
 
-| Tier | Label | Meaning |
-|---|---|---|
-| 1 | Authoritative | Verified against official/primary source |
-| 2 | Multi-Source | Verified against multiple independent domains |
-| 3 | Model Assisted | Mechanically verified; semantic relied on model knowledge |
-| 4 | Misrepresented | Quote exists but claim distorts context |
-| 5 | Hallucinated | Quote not found in source chunk |
-| 6 | Conflicted | Reserved for future contradiction detection |
+Each tier states exactly what the engine checked — no more.
+
+| Tier | Label | What it proves | What it does *not* prove |
+|---|---|---|---|
+| 1 | Authoritative | Quote is verbatim in the source, faithfully represents it, and at least one cited domain is on the configured primary-source list | That the primary-source list is complete — a genuinely authoritative domain that isn't on it lands at Tier 3 |
+| 2 | Multi-Domain | Quote is verbatim, faithfully represents the source, and the sentence cites ≥2 distinct domains | **That those domains agree.** This is coverage, not corroboration — the sources are not compared to each other |
+| 3 | Model Assisted | Quote is verbatim and faithfully represents the source | Any authority or cross-source claim |
+| 4 | Misrepresented | Quote is verbatim, but the claim distorts what the source says | — |
+| 5 | Hallucinated | Quote was **not found** in the cited chunk | — |
+| 6 | Conflicted | *Not implemented.* Reserved for cross-source contradiction detection; the verifier never assigns this tier today | — |
+
+Tier 1 and Tier 2 are deterministic judgements about **sources**, computed
+from domain metadata — never inferred by a model. Tiers 3–5 describe the
+**claim-to-source** relationship: Tier 5 is a deterministic substring check
+(no LLM involved), Tier 4 is the model's faithfulness verdict.
+
+Tier 2 is named "Multi-Domain" rather than "Multi-Source" deliberately: it
+only establishes that a sentence draws on more than one domain. Detecting
+whether those sources actually *agree* requires an entailment check across
+citations, which is not yet implemented.
+
+## Verification sources
+
+A citation is only as verified as the text it was checked against.
+
+Search APIs return a short, query-biased **snippet** per result alongside the
+full page. A snippet is a summary — a quote the model copied verbatim from the
+real page can be missing from it. Verifying against snippets therefore produces
+Tier 5 (Hallucinated) verdicts for claims the source actually supports, which is
+the worst possible failure for this product: it discredits correct answers.
+
+Axiom requests full page text by default (`AXIOM_FETCH_FULL_PAGES=true`) so
+"verified against the source" means the source. Pages that yield no extractable
+text — paywalls, JS-only rendering, robots-blocked — fall back to the snippet
+rather than being dropped, and every such document is recorded in the audit
+trail as `retriever_snippet_only_source`, with a `snippet_only_docs` count on
+`retriever_complete`. Each indexed chunk also carries `content_mode`
+(`raw` | `snippet`), so a Tier 5 traced back to a snippet-only source can be
+told apart from a genuine hallucination.
+
+Fetching pages costs latency and payload size. Set `AXIOM_FETCH_FULL_PAGES=false`
+to opt out — the startup log will warn that citations are being verified against
+snippets.
 
 ## CLI reference
 
@@ -172,7 +215,7 @@ tokens, best-effort USD cost, and a per-model breakdown:
   "total_tokens": 2830,
   "cost_usd": 0.00042,
   "by_model": {
-    "claude-sonnet-4-5": {"calls": 1, "prompt_tokens": 2500, "completion_tokens": 150, "cost_usd": 0.00040}
+    "claude-opus-4-8": {"calls": 1, "prompt_tokens": 2500, "completion_tokens": 150, "cost_usd": 0.00040}
   }
 }
 ```

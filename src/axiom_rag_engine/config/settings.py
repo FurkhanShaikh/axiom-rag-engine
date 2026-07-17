@@ -116,8 +116,10 @@ class Settings(BaseSettings):
     )
 
     # ── LLM defaults ─────────────────────────────────────────────────────
+    # These doubles as the "operator did not choose a model" sentinel — see
+    # _resolve_llm_defaults in main.py, which reads them via model_fields.
     default_synthesizer_model: str = Field(
-        default="claude-sonnet-4-5",
+        default="claude-opus-4-8",
         description="Default synthesizer LiteLLM model ID.",
     )
     default_verifier_model: str = Field(
@@ -156,6 +158,24 @@ class Settings(BaseSettings):
     allow_mock_search: bool = Field(
         default=False,
         description="If true, allow MockSearchBackend in non-development envs.",
+    )
+    fetch_full_pages: bool = Field(
+        default=True,
+        description=(
+            "Request full page text from the search backend instead of verifying "
+            "against its short result snippet. Snippets are a summary of the page, "
+            "so a quote can be genuinely present on the source and still fail "
+            "mechanical verification as Tier 5. Disable to cut retrieval latency "
+            "and payload size at the cost of that false-negative rate."
+        ),
+    )
+    max_raw_content_chars: int = Field(
+        default=200_000,
+        ge=1_000,
+        description=(
+            "Per-document cap on full page text. Bounds memory and chunking work "
+            "when a single result is very large; the page is truncated, not dropped."
+        ),
     )
     authoritative_domains: CommaSepList = Field(
         default_factory=list,
@@ -200,9 +220,15 @@ class Settings(BaseSettings):
     )
     allowed_metric_models: CommaSepList = Field(
         default_factory=lambda: [
-            # Claude 4.x family
+            # Claude 5 family
+            "claude-fable-5",
+            "claude-sonnet-5",
+            # Claude 4.x
+            "claude-opus-4-8",
+            "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-sonnet-4-6",
+            "claude-haiku-4-5",
             "claude-haiku-4-5-20251001",
             # Claude 4.5 legacy
             "claude-sonnet-4-5",

@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — LangGraph GraphState
+Axiom Engine — LangGraph GraphState
 Uses typing.Annotated + operator.add only where append-only semantics are safe.
 Evidence and rewrite state are replaced on retry passes so stale data cannot
 pollute fresh retrieval attempts or leak obsolete rewrite instructions.

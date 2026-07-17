@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Unified Verification Node (Module 7)
+Axiom Engine — Unified Verification Node (Module 7)
 
 Orchestrates the two-stage verification pipeline:
   Stage 1: MechanicalVerifier (deterministic, non-negotiable)

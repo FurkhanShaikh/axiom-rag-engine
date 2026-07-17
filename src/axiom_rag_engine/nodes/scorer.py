@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Source & Chunk Quality Scorer (Modules 3–4)
+Axiom Engine — Source & Chunk Quality Scorer (Modules 3–4)
 
 Responsibilities:
   - Assigns a source_quality_score (0.0–1.0) to each chunk based on domain
@@ -36,7 +36,7 @@ logger = logging.getLogger("axiom_rag_engine.scorer")
 #       sources such as Wikipedia must NOT appear here.
 #   _DEFAULT_REFERENCE_DOMAINS — academic papers, encyclopedias, and curated
 #       reference works.  These are high-quality but not "official primary
-#       sources"; they cap out at Tier 2 ("Consensus") or Tier 3.
+#       sources"; they cap out at Tier 2 ("Multi-Domain") or Tier 3.
 #   _DEFAULT_AUTHORITATIVE_DOMAINS — union of the two sets above; used by the
 #       scorer for the quality score (both tiers receive 0.9 quality boost).
 # ---------------------------------------------------------------------------

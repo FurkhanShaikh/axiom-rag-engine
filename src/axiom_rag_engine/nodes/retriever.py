@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Retrieval & Indexing Node (Module 2)
+Axiom Engine — Retrieval & Indexing Node (Module 2)
 
 Responsibilities:
   - Generates search queries from the user query (original + reformulations).
@@ -193,6 +193,12 @@ class SearchBackend(Protocol):
           - "url": str
           - "content": str (may contain HTML)
           - "title": str (optional)
+          - "content_mode": "raw" | "snippet" (optional; defaults to "unknown")
+            Whether ``content`` is the full page text or a search snippet.
+            Citations are verified against this text, so a snippet can produce
+            a Tier 5 (hallucinated) verdict for a quote that genuinely exists
+            on the page. Backends should report it so the audit trail can
+            distinguish the two failure causes.
         """
         ...
 
@@ -420,6 +426,7 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
     total_duplicate_urls = 0
     total_duplicate_chunks = 0
     failed_queries = 0
+    snippet_only_docs = 0
     cap_hit = False
 
     # On re-retrieval, seed seen_urls with URLs already mapped globally from past cycles.
@@ -488,11 +495,24 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
             new_urls.append(normalized_url)
 
             raw_content: str = result.get("content", "")
+            content_mode: str = result.get("content_mode", "unknown")
             clean_text = strip_html(raw_content)
 
             if not clean_text:
                 audit.append(_audit("retriever_empty_content", {"url": url}))
                 continue
+
+            if content_mode == "snippet":
+                # Citations against this doc are checked against a snippet, not
+                # the page — a Tier 5 here may be a verification artifact rather
+                # than a real hallucination. Record it so the two are separable.
+                snippet_only_docs += 1
+                audit.append(
+                    _audit(
+                        "retriever_snippet_only_source",
+                        {"url": url, "chars": len(clean_text)},
+                    )
+                )
 
             paragraphs = chunk_into_paragraphs(clean_text)
             title: str = result.get("title", "")
@@ -520,6 +540,10 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
                         "title": title,
                         "doc_index": doc_counter,
                         "chunk_index": chunk_idx,
+                        # Whether this chunk came from the full page or a search
+                        # snippet — the verifier's Tier 5 verdicts are only as
+                        # trustworthy as the text they were checked against.
+                        "content_mode": content_mode,
                     }
                 )
 
@@ -545,6 +569,7 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
                 "duplicate_urls_skipped": total_duplicate_urls,
                 "duplicate_chunks_skipped": total_duplicate_chunks,
                 "total_chunks": len(indexed_chunks),
+                "snippet_only_docs": snippet_only_docs,
             },
         )
     )

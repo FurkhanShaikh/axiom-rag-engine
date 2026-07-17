@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Cognitive Synthesizer Node (Module 6)
+Axiom Engine — Cognitive Synthesizer Node (Module 6)
 
 Responsibilities:
   - Calls the configured heavy LLM via LiteLLM.

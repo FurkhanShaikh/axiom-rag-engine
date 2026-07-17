@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Semantic Verifier Node (Module 7, Stage 2)
+Axiom Engine — Semantic Verifier Node (Module 7, Stage 2)
 
 Responsibilities:
   - Runs only after Mechanical Verification has checked every citation.
@@ -7,12 +7,13 @@ Responsibilities:
     faithfully represents its cited source chunk in context.
   - Emits citation-level verification objects and sentence-level rollups.
   - Assigns Tier 1 and Tier 2 only from deterministic source signals:
-      * Tier 1: at least one authoritative source and no verification failures.
-      * Tier 2: multiple independent domains and no verification failures.
-      * Tier 3: mechanically valid but authority/consensus not proven.
+      * Tier 1: at least one primary-source domain and no verification failures.
+      * Tier 2: ≥2 distinct domains and no verification failures. This proves
+        coverage, not agreement — the sources are never compared to each other.
+      * Tier 3: mechanically valid but no authority/multi-domain signal.
       * Tier 4: semantic misrepresentation.
-      * Tier 5: mechanical failure (quote not verbatim in any source chunk).
-  - Never guesses Tier 6 without explicit contradiction logic.
+      * Tier 5: mechanical failure (quote not verbatim in the cited chunk).
+  - Never assigns Tier 6: contradiction detection is not implemented.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from axiom_rag_engine.config.observability import (
 )
 from axiom_rag_engine.models import (
     Citation,
+    CitationSource,
     FinalSentence,
     VerificationResult,
     VerifiedCitation,
@@ -251,6 +253,26 @@ def _build_tier4_rewrite_request(
     )
 
 
+def _resolve_citation_source(
+    chunk_id: str,
+    chunk_lookup: dict[str, dict[str, Any]],
+) -> CitationSource | None:
+    """Resolve a citation's provenance from the indexed chunk it references.
+
+    Server-side only: the URL/title/domain come from the retriever's indexed
+    chunks, never from LLM output, so the synthesizer cannot fabricate a source.
+    Returns None when the chunk_id does not resolve (hallucinated reference).
+    """
+    chunk_data = chunk_lookup.get(chunk_id)
+    if chunk_data is None:
+        return None
+    return CitationSource(
+        url=str(chunk_data.get("source_url", "") or ""),
+        title=str(chunk_data.get("title", "") or ""),
+        domain=str(chunk_data.get("domain", "") or ""),
+    )
+
+
 def _build_uncited_sentence_request(sentence_id: str) -> str:
     return (
         f"Sentence {sentence_id}: unsupported sentence — every answer sentence "
@@ -321,10 +343,11 @@ def _aggregate_sentence_verification(
       Tier 1 — all semantic passed AND at least one citation is from a *primary*
                source (government body, official spec, official platform docs).
                Tertiary sources (Wikipedia, arXiv, Britannica) are excluded.
-      Tier 2 — all semantic passed AND citations span ≥2 distinct domains.
-               NOTE: This only proves multi-domain coverage, not that the sources
-               *agree*.  Agreement detection requires an NLI check not yet
-               implemented; treat Tier 2 as "multi-source" until that ships.
+      Tier 2 — all semantic passed AND citations span ≥2 distinct domains
+               ("Multi-Domain").  This proves coverage only: the cited sources
+               are never compared against one another, so Tier 2 does NOT mean
+               they agree.  Cross-source entailment is not implemented — do not
+               describe or relabel this tier as "consensus".
       Tier 3 — default for mechanically+semantically valid but lower-authority.
     """
     if not verified_citations:
@@ -658,6 +681,7 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                 chunk_id=citation.chunk_id,
                 exact_source_quote=citation.exact_source_quote,
                 verification=vr,
+                source=_resolve_citation_source(citation.chunk_id, chunk_lookup),
             )
             verified_citations.append(verified_citation)
 

@@ -14,11 +14,14 @@ Test categories:
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from axiom_rag_engine.nodes import semantic as semantic_module
 from axiom_rag_engine.nodes.semantic import _parse_semantic_response, semantic_verifier_node
 from axiom_rag_engine.nodes.synthesizer import (
     _parse_llm_response,
@@ -368,6 +371,83 @@ def _semantic_fail_json(reason: str) -> str:
     )
 
 
+class TestTierClaimsMatchImplementation:
+    """Lock the tier claims the README and UI make.
+
+    These are documentation-honesty guards: the docs state that Tier 6 is never
+    assigned and that Tier 2 means multi-domain coverage rather than agreement.
+    If contradiction detection or cross-source entailment ships, these tests are
+    the signal to update README.md, tier-colors.ts, and the tier semantics
+    comment in models.py — not to silently relax the assertion.
+    """
+
+    def test_tier_6_is_never_assigned(self) -> None:
+        """No code path may produce Tier 6 while contradiction detection is unimplemented."""
+        source = Path(semantic_module.__file__).read_text(encoding="utf-8")
+        # Match a tier=6 kwarg on any VerificationResult construction.
+        assert not re.search(r"\btier\s*=\s*6\b", source), (
+            "semantic.py assigns Tier 6, but the schema, README, and UI all state "
+            "it is never assigned. Ship contradiction detection and update those "
+            "claims together, or remove the assignment."
+        )
+
+    async def test_two_domains_without_agreement_check_is_tier_2(self) -> None:
+        """Tier 2 must key off distinct domains only — it must not verify agreement.
+
+        Both chunks below assert *contradictory* facts. Tier 2 is still correct
+        today precisely because no cross-source comparison happens; this test
+        documents that limitation rather than endorsing it. When entailment
+        lands (roadmap 2.2), this case should become Tier 6 or drop to Tier 3.
+        """
+        chunks = [
+            {
+                "chunk_id": "doc_1_chunk_A",
+                "text": "The committee reported that the measure passed with 60 votes.",
+                "source_url": "https://alpha.example.com/report",
+                "domain": "alpha.example.com",
+            },
+            {
+                "chunk_id": "doc_2_chunk_A",
+                "text": "The committee reported that the measure failed to reach 60 votes.",
+                "source_url": "https://beta.example.org/report",
+                "domain": "beta.example.org",
+            },
+        ]
+        draft = [
+            {
+                "sentence_id": "s_01",
+                "text": "The committee reported on the measure.",
+                "is_cited": True,
+                "citations": [
+                    {
+                        "citation_id": "cite_1",
+                        "chunk_id": "doc_1_chunk_A",
+                        "exact_source_quote": "the measure passed with 60 votes",
+                    },
+                    {
+                        "citation_id": "cite_2",
+                        "chunk_id": "doc_2_chunk_A",
+                        "exact_source_quote": "the measure failed to reach 60 votes",
+                    },
+                ],
+            }
+        ]
+        state = _make_state(
+            indexed_chunks=chunks,
+            draft_sentences=draft,
+            mechanical_results={"cite_1": _mech_result("passed"), "cite_2": _mech_result("passed")},
+        )
+        with patch(
+            "axiom_rag_engine.nodes.semantic.litellm.acompletion", new_callable=AsyncMock
+        ) as mock_comp:
+            mock_comp.return_value = _mock_litellm_response(_semantic_pass_json())
+            result = await semantic_verifier_node(state)
+
+        vr = result["final_sentences"][0]["verification"]
+        assert vr["tier"] == 2
+        assert vr["tier_label"] == "multi_source"
+
+
 class TestSemanticVerifierTierAssignment:
     async def test_authoritative_sentence_gets_tier_1(self) -> None:
         draft = [
@@ -499,6 +579,69 @@ class TestSemanticVerifierTierAssignment:
         assert vr["tier"] == 4
         assert len(result["rewrite_requests"]) == 1
         assert "Tier 4" in result["rewrite_requests"][0]
+
+
+class TestCitationSourceResolution:
+    """Citations must carry provenance resolved server-side from indexed chunks."""
+
+    async def test_citation_carries_resolved_source(self) -> None:
+        draft = [
+            {
+                "sentence_id": "s_01",
+                "text": "Solid-state batteries replace liquid electrolytes with solid ceramics.",
+                "is_cited": True,
+                "citations": [
+                    {
+                        "citation_id": "cite_1",
+                        "chunk_id": "doc_1_chunk_A",
+                        "exact_source_quote": "Solid-state batteries replace liquid electrolytes with solid ceramics.",
+                    }
+                ],
+            }
+        ]
+        state = _make_state(
+            indexed_chunks=_SAMPLE_CHUNKS,
+            draft_sentences=draft,
+            mechanical_results={"cite_1": _mech_result("passed")},
+        )
+        with patch(
+            "axiom_rag_engine.nodes.semantic.litellm.acompletion", new_callable=AsyncMock
+        ) as mock_comp:
+            mock_comp.return_value = _mock_litellm_response(_semantic_pass_json())
+            result = await semantic_verifier_node(state)
+
+        citation = result["final_sentences"][0]["citations"][0]
+        assert citation["source"] == {
+            "url": "https://example.com/batteries",
+            "title": "",
+            "domain": "example.com",
+        }
+
+    async def test_unresolvable_chunk_yields_null_source(self) -> None:
+        """A citation referencing a nonexistent chunk gets source=None, not a fabricated URL."""
+        draft = [
+            {
+                "sentence_id": "s_01",
+                "text": "A claim citing a chunk that does not exist.",
+                "is_cited": True,
+                "citations": [
+                    {
+                        "citation_id": "cite_1",
+                        "chunk_id": "doc_99_chunk_Z",
+                        "exact_source_quote": "Quote that matches nothing in the index.",
+                    }
+                ],
+            }
+        ]
+        state = _make_state(
+            indexed_chunks=_SAMPLE_CHUNKS,
+            draft_sentences=draft,
+            mechanical_results={"cite_1": _mech_result("failed")},
+        )
+        result = await semantic_verifier_node(state)
+
+        citation = result["final_sentences"][0]["citations"][0]
+        assert citation["source"] is None
 
 
 # ===========================================================================

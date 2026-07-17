@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — Mechanical Verifier (Stage 1, Non-Negotiable Floor)
+Axiom Engine — Mechanical Verifier (Stage 1, Non-Negotiable Floor)
 
 Deterministic citation integrity checker. No LLM involved.
 

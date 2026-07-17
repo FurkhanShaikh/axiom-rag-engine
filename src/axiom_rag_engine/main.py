@@ -1,5 +1,5 @@
 """
-Axiom Engine v2.3 — FastAPI Gateway
+Axiom Engine — FastAPI Gateway
 
 This module is the application entry point.  Domain logic has been extracted
 into focused modules; this file handles only:
@@ -62,7 +62,7 @@ from axiom_rag_engine.config.observability import (
     setup_prometheus,
     setup_tracing,
 )
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import Settings, get_settings
 from axiom_rag_engine.graph import build_axiom_graph
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
 from axiom_rag_engine.models import AxiomRequest, AxiomResponse
@@ -88,9 +88,12 @@ logger = logging.getLogger("axiom_rag_engine")
 # LLM provider detection
 # ---------------------------------------------------------------------------
 
-# Python-level defaults from settings.py — used to detect "not explicitly set"
-_SETTINGS_DEFAULT_SYNTH = "claude-sonnet-4-5"
-_SETTINGS_DEFAULT_VERIF = "gpt-4o-mini"
+# Read the built-in defaults straight off the Settings fields rather than
+# restating them: these are compared against the resolved config to detect
+# "operator did not choose a model", so a copy that drifts from settings.py
+# would silently make every request look operator-configured.
+_SETTINGS_DEFAULT_SYNTH: str = Settings.model_fields["default_synthesizer_model"].default
+_SETTINGS_DEFAULT_VERIF: str = Settings.model_fields["default_verifier_model"].default
 
 # Ollama model preference order (first match wins)
 _OLLAMA_PREFERENCE = [
@@ -160,17 +163,21 @@ def _resolve_llm_defaults(
             return configured
 
         if role == "synthesizer":
+            # Synthesis is the quality-critical step — every cited claim
+            # originates here — so prefer the most capable available model.
             if has_anthropic:
-                return "claude-sonnet-4-6"
+                return "claude-opus-4-8"
             if has_openai:
                 return "gpt-4o"
             if has_ollama:
                 return f"ollama/{best_ollama}"
         else:  # verifier
+            # Verification is a per-citation entailment check: high volume,
+            # narrow judgment. A small fast model is the right trade here.
             if has_openai:
                 return "gpt-4o-mini"
             if has_anthropic:
-                return "claude-haiku-4-5-20251001"
+                return "claude-haiku-4-5"
             if has_ollama:
                 return f"ollama/{best_ollama}"
 
@@ -469,9 +476,24 @@ async def lifespan(app: FastAPI):
     if tavily_key:
         from axiom_rag_engine.search.tavily import TavilySearchBackend
 
-        set_search_backend(TavilySearchBackend(api_key=tavily_key))
+        set_search_backend(
+            TavilySearchBackend(
+                api_key=tavily_key,
+                fetch_full_pages=settings.fetch_full_pages,
+                max_raw_content_chars=settings.max_raw_content_chars,
+            )
+        )
         app.state.search_backend_mode = "tavily"
-        logger.info("Search backend: Tavily (live web search enabled).")
+        if settings.fetch_full_pages:
+            logger.info(
+                "Search backend: Tavily (live web search, verifying against full page text)."
+            )
+        else:
+            logger.warning(
+                "Search backend: Tavily with AXIOM_FETCH_FULL_PAGES=false — citations are "
+                "verified against search snippets, not the source page. Quotes that exist "
+                "on the page but not in the snippet will be marked Tier 5 (hallucinated)."
+            )
     elif _auth_required() and not _allow_mock_search():
         raise RuntimeError(
             "TAVILY_API_KEY must be configured in non-development environments unless "
@@ -492,7 +514,9 @@ async def lifespan(app: FastAPI):
     logger.info("Axiom Engine shutting down.")
 
 
-_VERSION = "0.1.0b1-dev"
+# pyproject.toml is the single source of truth; this fallback only applies when
+# running from a source tree with no distribution metadata installed.
+_VERSION = "0.0.0+unknown"
 with contextlib.suppress(importlib.metadata.PackageNotFoundError):
     _VERSION = importlib.metadata.version("axiom-rag-engine")
 
@@ -502,7 +526,7 @@ _docs_enabled = _startup_settings.docs_enabled
 app = FastAPI(
     title="Axiom Engine",
     version=_VERSION,
-    description="Configuration-driven Agentic RAG with 6-tier verification.",
+    description="Configuration-driven Agentic RAG with 5-tier citation verification.",
     lifespan=lifespan,
     docs_url="/docs" if _docs_enabled else None,
     redoc_url="/redoc" if _docs_enabled else None,
