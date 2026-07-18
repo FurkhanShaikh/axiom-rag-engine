@@ -40,7 +40,7 @@ class FakeEmbedder:
     def embed_corpus(self, doc_ids: list[str], texts: list[str]) -> np.ndarray:
         return self._lookup(texts)
 
-    def embed_texts(self, texts: list[str], *, label: str = "") -> np.ndarray:
+    def embed_queries(self, texts: list[str], *, label: str = "") -> np.ndarray:
         return self._lookup(texts)
 
 

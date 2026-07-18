@@ -82,6 +82,30 @@ class TestBM25Fidelity:
         ranked = ranker.rank("")
         assert sorted(ranked) == sorted(str(i) for i in range(len(_DOCS)))
 
+    def test_rank_matches_bruteforce_score(self) -> None:
+        """The fast inverted-index rank() must equal a full _score sort.
+
+        _score is pinned to production by test_fast_score_matches_production;
+        this pins the optimized rank() to _score, so the speedup can never change
+        the measured ranking.
+        """
+        ranker = reval.BM25Ranker(self._corpus())
+        from axiom_rag_engine.nodes.ranker import _tokenize
+
+        for q in _QUERIES:
+            fast = ranker.rank(q)
+            qtokens = _tokenize(q)
+            if not qtokens:
+                continue
+            brute = [
+                ranker.doc_ids[i]
+                for _, i in sorted(
+                    ((ranker._score(qtokens, i), i) for i in range(len(ranker.doc_ids))),
+                    key=lambda t: (-t[0], t[1]),
+                )
+            ]
+            assert fast == brute, f"query={q!r}: fast rank != brute-force _score rank"
+
 
 class TestIRMetrics:
     def test_recall_at_k(self) -> None:

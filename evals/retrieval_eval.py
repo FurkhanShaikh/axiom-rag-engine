@@ -56,6 +56,7 @@ from axiom_rag_engine.nodes.ranker import (
 
 EVALS_DIR = Path(__file__).resolve().parent
 SCIFACT_DIR = EVALS_DIR / "data" / "scifact"
+BEIR_DIR = EVALS_DIR / "data" / "beir"
 RESULTS_DIR = EVALS_DIR / "results"
 BASELINE_PATH = EVALS_DIR / "baselines" / "retrieval-bm25.json"
 
@@ -155,6 +156,72 @@ def load_queries(split: str = "dev", *, paraphrased: bool = False) -> list[Query
 
 
 # ---------------------------------------------------------------------------
+# BEIR-format datasets (corpus.jsonl / queries.jsonl / qrels/test.tsv)
+# ---------------------------------------------------------------------------
+
+
+def load_beir(name: str) -> tuple[Corpus, list[Query]]:
+    """Load a BEIR-format dataset (e.g. ArguAna) into the eval's shapes.
+
+    BEIR is the standard IR benchmark layout: ``corpus.jsonl`` (``_id``/``title``
+    /``text``), ``queries.jsonl`` (``_id``/``text``), and ``qrels/test.tsv``
+    (``query-id  corpus-id  score``). Only queries with at least one positive
+    qrel are kept, mirroring the SciFact loader.
+    """
+    root = BEIR_DIR / name
+    if not root.exists():
+        _echo(
+            f"BEIR dataset not found at {root}. Run: python tasks.py evals download-beir -- {name}"
+        )
+        sys.exit(1)
+
+    doc_ids: list[str] = []
+    texts: list[str] = []
+    for line in (root / "corpus.jsonl").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        doc = json.loads(line)
+        doc_ids.append(str(doc["_id"]))
+        title = doc.get("title", "") or ""
+        body = doc.get("text", "") or ""
+        texts.append(f"{title}. {body}".strip())
+    corpus = Corpus(doc_ids=doc_ids, texts=texts)
+
+    # qrels: query_id -> set of relevant doc_ids (score > 0)
+    relevant: dict[str, set[str]] = {}
+    qrels_path = root / "qrels" / "test.tsv"
+    for i, line in enumerate(qrels_path.read_text(encoding="utf-8").splitlines()):
+        if i == 0 or not line.strip():  # header row
+            continue
+        qid, docid, score = line.split("\t")[:3]
+        if int(score) > 0:
+            relevant.setdefault(qid, set()).add(docid)
+
+    query_text: dict[str, str] = {}
+    for line in (root / "queries.jsonl").read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            q = json.loads(line)
+            query_text[str(q["_id"])] = q["text"]
+
+    queries = [
+        Query(claim_id=qid, text=query_text[qid], relevant_doc_ids=docs)
+        for qid, docs in relevant.items()
+        if qid in query_text
+    ]
+    return corpus, queries
+
+
+def load_dataset(dataset: str, *, paraphrased: bool) -> tuple[Corpus, list[Query]]:
+    """Dispatch to the SciFact-native or BEIR-format loader."""
+    if dataset == "scifact":
+        return load_corpus(), load_queries("dev", paraphrased=paraphrased)
+    if paraphrased:
+        _echo("--paraphrased is only supported for the scifact dataset.")
+        sys.exit(1)
+    return load_beir(dataset)
+
+
+# ---------------------------------------------------------------------------
 # Rankers
 # ---------------------------------------------------------------------------
 
@@ -180,16 +247,25 @@ class BM25Ranker:
         self.doc_ids = corpus.doc_ids
         self._tfs: list[Counter[str]] = []
         self._lens: list[int] = []
-        for text in corpus.texts:
+        # Inverted index: term -> doc indices containing it. Lets rank() score
+        # only docs that share a query term instead of the whole corpus.
+        self._postings: dict[str, list[int]] = {}
+        for idx, text in enumerate(corpus.texts):
             tokens = _tokenize(text)
-            self._tfs.append(Counter(tokens))
+            tf = Counter(tokens)
+            self._tfs.append(tf)
             self._lens.append(len(tokens))
+            for term in tf:
+                self._postings.setdefault(term, []).append(idx)
         n = len(self._lens)
         self._avg_len = (sum(self._lens) / n) if n else 1.0
         # compute_corpus_idf expects chunk dicts with a "text" field.
         self._idf = compute_corpus_idf([{"text": t} for t in corpus.texts])
 
     def _score(self, query_tokens: list[str], doc_idx: int) -> float:
+        """Per-pair BM25, kept as the reference the fidelity test pins to
+        production. ``rank`` uses the faster inverted-index path below, which
+        produces identical scores (see test_rank_matches_bruteforce_score)."""
         tf = self._tfs[doc_idx]
         doc_len = self._lens[doc_idx]
         score = 0.0
@@ -213,10 +289,31 @@ class BM25Ranker:
         query_tokens = _tokenize(query)
         if not query_tokens:
             return list(self.doc_ids)
-        scored = [(self._score(query_tokens, i), i) for i in range(len(self.doc_ids))]
-        # Sort by score desc, then doc index for a stable, reproducible order.
-        scored.sort(key=lambda t: (-t[0], t[1]))
-        return [self.doc_ids[i] for _, i in scored]
+        query_terms = set(query_tokens)
+        # max_possible is query-dependent but doc-independent — compute it once,
+        # not per doc (the previous per-doc recomputation was the hot spot).
+        max_possible = sum(
+            self._idf.get(t, 1.0) * (_BM25_K1 + 1) / (1 + _BM25_K1) for t in query_terms
+        )
+        # Accumulate the raw score for each doc that contains a query term.
+        # Docs sharing no term score exactly 0.0 (as in _score), so they are
+        # never visited — only their default 0.0 rank matters.
+        raw: dict[int, float] = {}
+        for term in query_terms:
+            term_idf = self._idf.get(term, 1.0)
+            for idx in self._postings.get(term, ()):
+                count = self._tfs[idx][term]
+                doc_len = self._lens[idx]
+                numerator = count * (_BM25_K1 + 1)
+                denominator = count + _BM25_K1 * (
+                    1 - _BM25_B + _BM25_B * doc_len / max(self._avg_len, 1.0)
+                )
+                raw[idx] = raw.get(idx, 0.0) + term_idf * numerator / denominator
+        scores: dict[int, float] = {}
+        if max_possible > 0:
+            scores = {idx: round(min(1.0, s / max_possible), 4) for idx, s in raw.items()}
+        order = sorted(range(len(self.doc_ids)), key=lambda i: (-scores.get(i, 0.0), i))
+        return [self.doc_ids[i] for i in order]
 
 
 class DenseRanker:
@@ -238,14 +335,14 @@ class DenseRanker:
         unique = [q for q in dict.fromkeys(queries) if q not in self._qcache]
         if not unique:
             return
-        vecs = self._embedder.embed_texts(unique, label="queries")
+        vecs = self._embedder.embed_queries(unique, label="queries")
         for q, v in zip(unique, vecs, strict=True):
             self._qcache[q] = v
 
     def _query_vec(self, query: str) -> np.ndarray:
         cached = self._qcache.get(query)
         if cached is None:
-            cached = self._embedder.embed_texts([query])[0]
+            cached = self._embedder.embed_queries([query])[0]
             self._qcache[query] = cached
         return cached
 
@@ -290,6 +387,17 @@ class HybridRanker:
 
 _METHODS = ("bm25", "dense", "hybrid")
 _NEEDS_EMBEDDER = frozenset({"dense", "hybrid"})
+
+
+def _embed_prefixes(model: str) -> tuple[str, str]:
+    """Return (doc_prefix, query_prefix) for instructed embedders.
+
+    nomic-embed-text is trained with task prefixes and loses substantial
+    retrieval quality without them. Other models default to no prefix.
+    """
+    if "nomic" in model.lower():
+        return "search_document: ", "search_query: "
+    return "", ""
 
 
 def build_ranker(method: str, corpus: Corpus, embedder: OllamaEmbedder | None) -> Ranker:
@@ -375,17 +483,16 @@ def run(
     method: str,
     limit: int,
     seed: int,
-    split: str,
+    dataset: str,
     gate_baseline: Path | None,
     embed_model: str,
     paraphrased: bool = False,
 ) -> int:
-    corpus = load_corpus()
-    queries = load_queries(split, paraphrased=paraphrased)
+    corpus, queries = load_dataset(dataset, paraphrased=paraphrased)
     query_kind = "paraphrased" if paraphrased else "original"
     _echo(
         f"Loaded corpus={len(corpus.doc_ids)} docs, "
-        f"labeled claims={len(queries)} ({split}, {query_kind} queries)"
+        f"labeled queries={len(queries)} ({dataset}, {query_kind} queries)"
     )
 
     rng = random.Random(seed)  # noqa: S311 - reproducible sampling, not crypto
@@ -398,8 +505,14 @@ def run(
 
         load_dotenv()
         base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
-        embedder = OllamaEmbedder(model=embed_model, base_url=base)
-        _echo(f"Embedder: {embed_model} @ {base}")
+        doc_prefix, query_prefix = _embed_prefixes(embed_model)
+        embedder = OllamaEmbedder(
+            model=embed_model,
+            base_url=base,
+            doc_prefix=doc_prefix,
+            query_prefix=query_prefix,
+        )
+        _echo(f"Embedder: {embed_model} @ {base}" + (" (nomic prefixes)" if doc_prefix else ""))
 
     _echo(f"Building {method} index over {len(corpus.doc_ids)} docs ...")
     ranker: Ranker = build_ranker(method, corpus, embedder)
@@ -431,13 +544,15 @@ def run(
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     tag = "paraphrased" if paraphrased else "original"
-    out_path = RESULTS_DIR / f"retrieval-{method}-{tag}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out_path = (
+        RESULTS_DIR / f"retrieval-{dataset}-{method}-{tag}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    )
     out_path.write_text(
         json.dumps(
             {
                 "eval": "retrieval",
                 "method": method,
-                "dataset": f"scifact/{split}",
+                "dataset": dataset,
                 "query_kind": tag,
                 "seed": seed,
                 "elapsed_s": round(elapsed, 1),
@@ -479,9 +594,14 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", default="bm25", choices=_METHODS, help="Retrieval method")
-    parser.add_argument("--limit", type=int, default=100, help="Max claims to score (0 = all)")
+    parser.add_argument("--limit", type=int, default=100, help="Max queries to score (0 = all)")
     parser.add_argument("--seed", type=int, default=13, help="Sampling seed")
-    parser.add_argument("--split", default="dev", choices=("dev", "train"))
+    parser.add_argument(
+        "--dataset",
+        default="scifact",
+        help="Dataset: 'scifact' (native) or a BEIR dataset name under evals/data/beir/ "
+        "(e.g. 'arguana').",
+    )
     parser.add_argument(
         "--embed-model",
         default="nomic-embed-text",
@@ -508,7 +628,7 @@ def main() -> None:
             args.method,
             args.limit,
             args.seed,
-            args.split,
+            args.dataset,
             baseline,
             args.embed_model,
             paraphrased=args.paraphrased,

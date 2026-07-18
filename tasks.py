@@ -212,6 +212,7 @@ def evals() -> None:
     args = sys.argv[2:]
     scripts = {
         "download": "evals/download_datasets.py",
+        "download-beir": "evals/download_beir.py",
         "semantic": "evals/semantic_verifier_eval.py",
         "e2e": "evals/e2e_eval.py",
         "retrieval": "evals/retrieval_eval.py",
@@ -223,7 +224,10 @@ def evals() -> None:
         _run("uv", "run", "python", "evals/retrieval_eval.py", "--limit", "0", "--gate")
         return
     if not args or args[0] not in scripts:
-        _echo("Usage: python tasks.py evals <download|semantic|e2e|retrieval|gate> [-- <args>]")
+        _echo(
+            "Usage: python tasks.py evals "
+            "<download|download-beir|semantic|e2e|retrieval|gate> [-- <args>]"
+        )
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]
     _run("uv", "run", "python", scripts[args[0]], *passthrough)

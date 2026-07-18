@@ -36,14 +36,30 @@ def _echo(msg: str = "") -> None:
 class OllamaEmbedder:
     """Batched Ollama embeddings with an on-disk corpus cache.
 
+    Instructed embedders (nomic-embed-text, e5, bge) need a task prefix on each
+    input or their retrieval quality collapses — nomic wants ``search_document:``
+    on corpus text and ``search_query:`` on queries. Those prefixes are applied
+    here and folded into the cache key so prefixed and unprefixed matrices never
+    collide.
+
     Args:
         model: Ollama embedding model (e.g. ``nomic-embed-text``).
         base_url: Ollama host.
+        doc_prefix: prepended to corpus documents before embedding.
+        query_prefix: prepended to queries before embedding.
     """
 
-    def __init__(self, model: str, base_url: str) -> None:
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        doc_prefix: str = "",
+        query_prefix: str = "",
+    ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.doc_prefix = doc_prefix
+        self.query_prefix = query_prefix
 
     # -- HTTP ---------------------------------------------------------------
 
@@ -61,28 +77,32 @@ class OllamaEmbedder:
             raise RuntimeError(f"Ollama returned no embeddings for a batch of {len(texts)} texts")
         return embeddings
 
-    def embed_texts(self, texts: list[str], *, label: str = "") -> np.ndarray:
-        """Embed a list of texts, returning an (n, dim) float32 matrix.
-
-        Rows are L2-normalized so a plain dot product is cosine similarity.
-        """
+    def _embed(self, texts: list[str], prefix: str, label: str) -> np.ndarray:
+        """Embed with a task prefix, returning an L2-normalized (n, dim) matrix."""
+        prefixed = [prefix + t for t in texts] if prefix else texts
         vectors: list[list[float]] = []
-        total = len(texts)
+        total = len(prefixed)
         for start in range(0, total, _BATCH_SIZE):
-            batch = texts[start : start + _BATCH_SIZE]
+            batch = prefixed[start : start + _BATCH_SIZE]
             vectors.extend(self._embed_batch(batch))
             if label and (start // _BATCH_SIZE) % 10 == 0:
                 _echo(f"  embedding {label}: {min(start + _BATCH_SIZE, total)}/{total}")
-        matrix = np.asarray(vectors, dtype=np.float32)
-        return _l2_normalize(matrix)
+        return _l2_normalize(np.asarray(vectors, dtype=np.float32))
+
+    def embed_queries(self, texts: list[str], *, label: str = "") -> np.ndarray:
+        """Embed queries (applies the query prefix)."""
+        return self._embed(texts, self.query_prefix, label)
 
     # -- Corpus cache -------------------------------------------------------
 
     def _cache_path(self, doc_ids: list[str], texts: list[str]) -> Path:
-        # Key on the model plus a digest of the corpus content and order, so a
-        # changed corpus (or model) misses rather than returning stale vectors.
+        # Key on model + doc_prefix + a digest of the corpus content and order, so
+        # a changed corpus, model, OR prefix misses rather than returning stale
+        # (e.g. unprefixed) vectors.
         h = hashlib.sha256()
         h.update(self.model.encode())
+        h.update(b"\x02")
+        h.update(self.doc_prefix.encode())
         for doc_id, text in zip(doc_ids, texts, strict=True):
             h.update(doc_id.encode())
             h.update(b"\x00")
@@ -99,7 +119,7 @@ class OllamaEmbedder:
             return np.load(cache_path)["matrix"]
 
         _echo(f"  corpus embeddings: cache miss — embedding {len(texts)} docs (one-time)")
-        matrix = self.embed_texts(texts, label="corpus")
+        matrix = self._embed(texts, self.doc_prefix, label="corpus")
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache_path, matrix=matrix)
         _echo(f"  corpus embeddings: cached to {cache_path.name}")
