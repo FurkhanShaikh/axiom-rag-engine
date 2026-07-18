@@ -12,6 +12,10 @@ A sixth tier (Conflicted) is defined in the response schema but is **not
 implemented** — the verifier never assigns it today. See
 [Verification tiers](#verification-tiers).
 
+Verification quality is measured, not asserted: see [BENCHMARKS.md](BENCHMARKS.md)
+for how the semantic verifier and the full pipeline are scored, and the
+regression gate that keeps those numbers from silently sliding.
+
 ## Install
 
 ```bash

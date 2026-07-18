@@ -68,22 +68,55 @@ between runs.
   faithful claims get bounced into rewrite loops (wasted LLM budget).
 - `error_rate` — examples where the verifier LLM failed to produce a verdict
 
-**Layer 2 (end-to-end)** — per-case expectation checks:
+**Layer 2 (end-to-end)** — per-case expectation checks. A case's `expect`
+block may assert any of:
 
-- `answerable` matches, `status` within expected set
-- `max_tier5_sentences` — Tier-5 leakage into the final response
+- `answerable` — the `is_answerable` verdict must match
+- `status_in` — response status must be one of the listed values
+- `max_tier5` — Tier-5 leakage ceiling (usually 0)
+- `max_tier1` — Tier-1 ceiling; used to prove a reference source (arXiv,
+  Wikipedia) is *not* promoted to Authoritative
 - `min_overall_score` — confidence floor for answerable cases
-- Aggregate: expectation pass rate, tier distribution, mechanical
-  false-negative proxy (Tier-5 rate on cases whose corpus verifiably
-  supports the answer)
+
+A case may also carry `app_config` and `pipeline_config` blocks, merged onto
+the defaults, so a single harness can exercise trust policy (`banned_domains`,
+`low_quality_domains`), `expertise_level`, and stage toggles without a bespoke
+runner per class.
+
+## The regression gate
+
+`--gate` turns a run into a pass/fail CI decision against a committed baseline
+in `evals/baselines/`. Each baseline lists the metrics that matter and a
+per-metric bound (`floor` or `ceiling`) plus a `tolerance` slack band for
+LLM run-to-run noise. See `evals/gate.py` for the full contract.
+
+```bash
+# Deterministic gate — no LLM keys, runs on every PR. Every golden case must
+# clear its pre-LLM answerability expectation.
+python tasks.py evals gate
+
+# Keyed semantic gate — nightly. report_only until real floors are recorded.
+python tasks.py evals semantic -- --model gpt-4o-mini --limit 200 --gate
+```
+
+A baseline is `enforce` (a regression fails CI, exit 1) or `report_only`
+(prints the comparison but never fails). `e2e-golden.json` is `enforce` — it
+gates on the deterministic `validate_pass_rate` and needs no keys.
+`semantic-verifier.json` ships `report_only` with placeholder floors until the
+first keyed run records defensible numbers; see `BENCHMARKS.md` for that
+one-time activation step.
+
+The gate's exit code is the CI signal: 0 = pass, 1 = a regression on an
+enforcing baseline (or a failing golden-case expectation).
 
 ## Interpreting results
 
-These evals are informative, not CI-gating (they need LLM keys and cost
-money). Treat the numbers as a baseline: record them before a change,
-re-run after, and investigate any metric that moves more than a few points.
-Small local models (Ollama) will score lower on Layer 1 than cloud
-models — compare like against like.
+Layer 1 (semantic) and the full Layer 2 (keyed) runs need LLM keys and cost
+money, so they run nightly, not on every PR. The deterministic Layer 2 gate
+(`--validate-only --gate`) runs on every PR. Treat the keyed numbers as a
+baseline: record them before a change, re-run after, and investigate any
+metric that moves more than the tolerance band. Small local models (Ollama)
+will score lower on Layer 1 than cloud models — compare like against like.
 
 ## Known measurement gaps
 

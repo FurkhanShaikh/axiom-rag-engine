@@ -22,15 +22,19 @@ import argparse
 import asyncio
 import json
 import random
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import gate
+
 EVALS_DIR = Path(__file__).resolve().parent
 SCIFACT_DIR = EVALS_DIR / "data" / "scifact"
 RESULTS_DIR = EVALS_DIR / "results"
+BASELINE_PATH = EVALS_DIR / "baselines" / "semantic-verifier.json"
 
 
 def _echo(message: str = "") -> None:
@@ -109,12 +113,49 @@ class Record:
     latency_s: float
 
 
+# Transient provider throttling (HTTP 429) is not a verifier error — it says
+# nothing about whether the verifier judges correctly, so retrying it keeps the
+# measurement honest. Free/shared model endpoints throttle aggressively with
+# short Retry-After windows, so an eval that counted every 429 as an "error"
+# would report a meaningless error_rate.
+_MAX_RATE_LIMIT_RETRIES = 4
+_MAX_BACKOFF_SECONDS = 40.0
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    return "ratelimit" in name or "429" in str(exc)
+
+
+def _retry_after_seconds(exc: Exception, attempt: int) -> float:
+    """Honor the provider's Retry-After if present, else exponential backoff."""
+    match = re.search(r'"retry_after_seconds"\s*:\s*([0-9.]+)', str(exc))
+    if match:
+        return min(float(match.group(1)) + 1.0, _MAX_BACKOFF_SECONDS)
+    return min(2.0**attempt, _MAX_BACKOFF_SECONDS)
+
+
+async def _verify_with_retry(**kwargs: Any) -> tuple[Any, str | None]:
+    """Call the production verifier, retrying only on transient rate limits."""
+    from axiom_rag_engine.nodes.semantic import _verify_citation
+
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            return await _verify_citation(**kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_rate_limited(exc) or attempt == _MAX_RATE_LIMIT_RETRIES:
+                raise
+            await asyncio.sleep(_retry_after_seconds(exc, attempt))
+    raise last_exc  # unreachable; for type-checkers
+
+
 async def _judge(example: Example, model: str) -> Record:
     """Run one example through the production semantic-verification path."""
     # Private import is deliberate: the eval must exercise the exact code the
     # verifier node runs, not a reimplementation of its prompt.
     from axiom_rag_engine.models import Citation
-    from axiom_rag_engine.nodes.semantic import _verify_citation
 
     citation = Citation(
         citation_id="eval_cite_1",
@@ -132,7 +173,7 @@ async def _judge(example: Example, model: str) -> Record:
     expected = "passed" if example.label == "SUPPORT" else "failed"
     start = time.monotonic()
     try:
-        verification, _reason = await _verify_citation(
+        verification, _reason = await _verify_with_retry(
             claim_text=example.claim,
             citation=citation,
             chunk_lookup=chunk_lookup,
@@ -166,10 +207,12 @@ def summarize(records: list[Record]) -> dict[str, Any]:
     precision = tp / (tp + fp) if (tp + fp) else 0.0
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    error_rate = errors / len(records) if records else 0.0
     return {
         "total": len(records),
         "scored": len(scored),
         "errors": errors,
+        "error_rate": round(error_rate, 4),
         "accuracy": round((tp + tn) / len(scored), 4) if scored else 0.0,
         "unfaithful_precision": round(precision, 4),
         "unfaithful_recall": round(recall, 4),
@@ -178,7 +221,18 @@ def summarize(records: list[Record]) -> dict[str, Any]:
     }
 
 
-async def run(model: str, limit: int, seed: int, split: str) -> None:
+def _gate_metrics(summary: dict[str, Any]) -> dict[str, float]:
+    """Flatten the summary into the metric names the baseline gates on."""
+    return {
+        "unfaithful_recall": summary["unfaithful_recall"],
+        "unfaithful_precision": summary["unfaithful_precision"],
+        "unfaithful_f1": summary["unfaithful_f1"],
+        "accuracy": summary["accuracy"],
+        "error_rate": summary["error_rate"],
+    }
+
+
+async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path | None) -> int:
     examples = load_examples(split)
     by_label = {
         "SUPPORT": sum(1 for e in examples if e.label == "SUPPORT"),
@@ -221,15 +275,39 @@ async def run(model: str, limit: int, seed: int, split: str) -> None:
     _echo()
     _echo(f"Full records: {out_path}")
 
+    if gate_baseline is not None:
+        baseline = gate.load_baseline(gate_baseline)
+        report = gate.evaluate_gate(_gate_metrics(summary), baseline)
+        _echo()
+        _echo(report.render())
+        return 1 if report.gating_failed else 0
+    return 0
+
 
 def main() -> None:
+    from _env import load_dotenv
+
+    load_dotenv()  # so litellm sees OPENROUTER_API_KEY / OPENAI_API_KEY / etc.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="gpt-4o-mini", help="LiteLLM model id for the verifier")
     parser.add_argument("--limit", type=int, default=50, help="Max examples (0 = all)")
     parser.add_argument("--seed", type=int, default=13, help="Sampling seed")
     parser.add_argument("--split", default="dev", choices=("dev", "train"))
+    parser.add_argument(
+        "--gate",
+        nargs="?",
+        const=str(BASELINE_PATH),
+        default=None,
+        metavar="BASELINE",
+        help=(
+            "Compare metrics against a baseline JSON and exit 1 on regression "
+            "(unless the baseline is report_only). "
+            f"Defaults to {BASELINE_PATH.name} when given no path."
+        ),
+    )
     args = parser.parse_args()
-    asyncio.run(run(args.model, args.limit, args.seed, args.split))
+    baseline = Path(args.gate) if args.gate else None
+    sys.exit(asyncio.run(run(args.model, args.limit, args.seed, args.split, baseline)))
 
 
 if __name__ == "__main__":

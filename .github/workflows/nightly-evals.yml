@@ -1,0 +1,76 @@
+name: Nightly Evals
+
+# Keyed quality evals — cost money, so they run on a schedule (and on demand),
+# not on every PR. The deterministic gate that runs per-PR lives in ci.yml.
+#
+# Activation: add an OPENAI_API_KEY repository secret (the default verifier
+# model is gpt-4o-mini). Without it, the job skips cleanly rather than failing.
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max SciFact examples to score (0 = all)"
+        required: false
+        default: "200"
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for provider key
+        id: guard
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "No OPENAI_API_KEY secret configured — skipping keyed evals."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: steps.guard.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        if: steps.guard.outputs.run == 'true'
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        if: steps.guard.outputs.run == 'true'
+        run: uv sync --frozen
+
+      - name: Download SciFact
+        if: steps.guard.outputs.run == 'true'
+        run: uv run python evals/download_datasets.py
+
+      - name: Semantic verifier eval (gate)
+        if: steps.guard.outputs.run == 'true'
+        env:
+          AXIOM_ENV: development
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        # The committed baseline ships report_only, so this reports the
+        # comparison without failing CI until real floors are recorded and
+        # enforcement is flipped (see BENCHMARKS.md). Once enforced, a
+        # regression fails this job.
+        run: |
+          uv run python evals/semantic_verifier_eval.py \
+            --model gpt-4o-mini \
+            --limit "${{ github.event.inputs.limit || '200' }}" \
+            --gate
+
+      - name: Upload eval results
+        if: steps.guard.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-eval-results
+          path: evals/results/semantic-*.json
+          if-no-files-found: warn

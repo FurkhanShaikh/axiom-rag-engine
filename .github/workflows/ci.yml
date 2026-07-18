@@ -52,6 +52,25 @@ jobs:
       - name: Run tests
         run: uv run pytest -m "not integration" --cov=axiom_rag_engine --cov-report=term-missing
 
+  evals-gate:
+    # Deterministic quality gate — no LLM keys, no cost. Runs the golden set
+    # through the retriever/scorer/ranker stages and the pre-LLM answerability
+    # gate, and fails if any case regresses. The keyed semantic + full e2e evals
+    # run nightly (see .github/workflows/nightly-evals.yml), not here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Regression gate (deterministic golden set)
+        env:
+          AXIOM_ENV: development
+        run: uv run python evals/e2e_eval.py --validate-only --gate
+
   security:
     runs-on: ubuntu-latest
     steps:

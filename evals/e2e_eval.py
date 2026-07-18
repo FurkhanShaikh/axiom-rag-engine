@@ -25,9 +25,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import gate
+
 EVALS_DIR = Path(__file__).resolve().parent
 SEED_PATH = EVALS_DIR / "golden" / "seed.jsonl"
 RESULTS_DIR = EVALS_DIR / "results"
+BASELINE_PATH = EVALS_DIR / "baselines" / "e2e-golden.json"
 
 
 def _echo(message: str = "") -> None:
@@ -41,6 +44,11 @@ class GoldenCase:
     search_results: list[dict[str, Any]]
     expect: dict[str, Any]
     comment: str = ""
+    # Optional per-case overrides merged onto the defaults. Lets a case exercise
+    # trust policy (banned_domains, low_quality_domains), expertise level, or
+    # pipeline stage toggles without a bespoke runner per class.
+    app_config: dict[str, Any] = field(default_factory=dict)
+    pipeline_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -74,9 +82,27 @@ def load_cases() -> list[GoldenCase]:
                     search_results=raw["search_results"],
                     expect=raw["expect"],
                     comment=raw.get("comment", ""),
+                    app_config=raw.get("app_config", {}),
+                    pipeline_config=raw.get("pipeline_config", {}),
                 )
             )
     return cases
+
+
+def _merged_configs(case: GoldenCase) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Case overrides merged onto the model defaults (shallow, one level deep)."""
+    from axiom_rag_engine.models import AppConfig, PipelineConfig
+
+    app_config = AppConfig().model_dump()
+    app_config.update(case.app_config)
+
+    pipeline_config = PipelineConfig().model_dump()
+    for key, value in case.pipeline_config.items():
+        if key == "stages" and isinstance(value, dict):
+            pipeline_config["stages"].update(value)
+        else:
+            pipeline_config[key] = value
+    return app_config, pipeline_config
 
 
 def _check_expectations(case: GoldenCase, response: Any) -> list[str]:
@@ -94,6 +120,12 @@ def _check_expectations(case: GoldenCase, response: Any) -> list[str]:
         tier5 = response.confidence_summary.tier_breakdown.tier_5_claims
         if tier5 > expect["max_tier5"]:
             failures.append(f"tier5 sentences: expected <= {expect['max_tier5']}, got {tier5}")
+    if "max_tier1" in expect:
+        # Guards the primary-vs-reference distinction: a reference source
+        # (arXiv, Wikipedia) must not be promoted to Tier 1.
+        tier1 = response.confidence_summary.tier_breakdown.tier_1_claims
+        if tier1 > expect["max_tier1"]:
+            failures.append(f"tier1 sentences: expected <= {expect['max_tier1']}, got {tier1}")
     if "min_overall_score" in expect:
         score = response.confidence_summary.overall_score
         if score < expect["min_overall_score"]:
@@ -105,18 +137,18 @@ def _check_expectations(case: GoldenCase, response: Any) -> list[str]:
 
 async def run_case(case: GoldenCase, engine: Any, model: str) -> CaseResult:
     from axiom_rag_engine.marshalling import marshal_response
-    from axiom_rag_engine.models import AppConfig, PipelineConfig
     from axiom_rag_engine.nodes.retriever import MockSearchBackend, set_search_backend
     from axiom_rag_engine.state import make_initial_state
     from axiom_rag_engine.utils.llm import get_llm_usage_snapshot, reset_llm_budget
 
+    app_config, pipeline_config = _merged_configs(case)
     set_search_backend(MockSearchBackend(case.search_results))
     initial_state = make_initial_state(
         request_id=f"eval-{case.case_id}",
         user_query=case.query,
-        app_config=AppConfig().model_dump(),
+        app_config=app_config,
         models_config={"synthesizer": model, "verifier": model},
-        pipeline_config=PipelineConfig().model_dump(),
+        pipeline_config=pipeline_config,
     )
     reset_llm_budget()
     start = time.monotonic()
@@ -155,7 +187,6 @@ async def run_case(case: GoldenCase, engine: Any, model: str) -> CaseResult:
 async def validate_case(case: GoldenCase) -> CaseResult:
     """LLM-free pass: run the deterministic stages and report the pre-LLM gate."""
     from axiom_rag_engine.config.settings import get_settings
-    from axiom_rag_engine.models import AppConfig, PipelineConfig
     from axiom_rag_engine.nodes.ranker import ranker_node
     from axiom_rag_engine.nodes.retriever import (
         MockSearchBackend,
@@ -165,14 +196,15 @@ async def validate_case(case: GoldenCase) -> CaseResult:
     from axiom_rag_engine.nodes.scorer import scorer_node
     from axiom_rag_engine.state import make_initial_state
 
+    app_config, pipeline_config = _merged_configs(case)
     set_search_backend(MockSearchBackend(case.search_results))
     state: dict[str, Any] = dict(
         make_initial_state(
             request_id=f"eval-{case.case_id}",
             user_query=case.query,
-            app_config=AppConfig().model_dump(),
+            app_config=app_config,
             models_config={},
-            pipeline_config=PipelineConfig().model_dump(),
+            pipeline_config=pipeline_config,
         )
     )
     state.update(await retriever_node(state))  # type: ignore[arg-type]
@@ -199,7 +231,20 @@ async def validate_case(case: GoldenCase) -> CaseResult:
     )
 
 
-async def run(model: str, validate_only: bool) -> int:
+def _observed_metrics(results: list[CaseResult], validate_only: bool) -> dict[str, float]:
+    """Flatten case results into the metric names the baseline gates on."""
+    total = len(results)
+    passed = sum(1 for r in results if r.passed)
+    pass_rate = passed / total if total else 0.0
+    if validate_only:
+        return {"validate_pass_rate": round(pass_rate, 4)}
+    return {
+        "pass_rate": round(pass_rate, 4),
+        "cost_usd": round(sum(float(r.usage.get("cost_usd") or 0.0) for r in results), 6),
+    }
+
+
+async def run(model: str, validate_only: bool, gate_baseline: Path | None) -> int:
     cases = load_cases()
     _echo(f"Loaded {len(cases)} golden cases from {SEED_PATH}")
 
@@ -222,6 +267,7 @@ async def run(model: str, validate_only: bool) -> int:
 
     passed = sum(1 for r in results if r.passed)
     total_cost = sum(float(r.usage.get("cost_usd") or 0.0) for r in results)
+    observed = _observed_metrics(results, validate_only)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     mode = "validate" if validate_only else "full"
@@ -232,7 +278,12 @@ async def run(model: str, validate_only: bool) -> int:
                 "eval": "e2e_golden",
                 "mode": mode,
                 "model": None if validate_only else model,
-                "summary": {"passed": passed, "total": len(results), "cost_usd": total_cost},
+                "summary": {
+                    "passed": passed,
+                    "total": len(results),
+                    "cost_usd": total_cost,
+                    "metrics": observed,
+                },
                 "cases": [r.__dict__ for r in results],
             },
             indent=2,
@@ -248,10 +299,27 @@ async def run(model: str, validate_only: bool) -> int:
     if validate_only:
         for r in results:
             _echo(f"  {r.case_id}: {r.status}")
-    return 0 if passed == len(results) else 1
+
+    # Per-case expectations are the first gate: any failing case is a
+    # regression regardless of the baseline.
+    cases_ok = passed == len(results)
+
+    if gate_baseline is not None:
+        baseline = gate.load_baseline(gate_baseline)
+        report = gate.evaluate_gate(observed, baseline)
+        _echo()
+        _echo(report.render())
+        if report.gating_failed or not cases_ok:
+            return 1
+        return 0
+
+    return 0 if cases_ok else 1
 
 
 def main() -> None:
+    from _env import load_dotenv
+
+    load_dotenv()  # so litellm sees OPENROUTER_API_KEY / OPENAI_API_KEY / etc.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="gpt-4o-mini", help="LiteLLM model id for both stages")
     parser.add_argument(
@@ -259,8 +327,20 @@ def main() -> None:
         action="store_true",
         help="No LLM: validate seed schema and run deterministic stages only",
     )
+    parser.add_argument(
+        "--gate",
+        nargs="?",
+        const=str(BASELINE_PATH),
+        default=None,
+        metavar="BASELINE",
+        help=(
+            "Fail (exit 1) if metrics regress against a baseline JSON. "
+            f"Defaults to {BASELINE_PATH.name} when given no path."
+        ),
+    )
     args = parser.parse_args()
-    sys.exit(asyncio.run(run(args.model, args.validate_only)))
+    baseline = Path(args.gate) if args.gate else None
+    sys.exit(asyncio.run(run(args.model, args.validate_only, baseline)))
 
 
 if __name__ == "__main__":

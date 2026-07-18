@@ -205,6 +205,9 @@ def evals() -> None:
         python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
         python tasks.py evals e2e -- --model ollama/qwen3:8b
         python tasks.py evals e2e -- --validate-only                  # no LLM needed
+        python tasks.py evals gate                                    # deterministic CI gate (no LLM)
+        python tasks.py evals e2e -- --validate-only --gate           # same, explicit
+        python tasks.py evals semantic -- --model gpt-4o-mini --gate  # keyed gate
     """
     args = sys.argv[2:]
     scripts = {
@@ -212,8 +215,12 @@ def evals() -> None:
         "semantic": "evals/semantic_verifier_eval.py",
         "e2e": "evals/e2e_eval.py",
     }
+    # `gate` is the CI entry point: the deterministic e2e gate, no LLM keys.
+    if args and args[0] == "gate":
+        _run("uv", "run", "python", "evals/e2e_eval.py", "--validate-only", "--gate")
+        return
     if not args or args[0] not in scripts:
-        _echo("Usage: python tasks.py evals <download|semantic|e2e> [-- <args>]")
+        _echo("Usage: python tasks.py evals <download|semantic|e2e|gate> [-- <args>]")
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]
     _run("uv", "run", "python", scripts[args[0]], *passthrough)

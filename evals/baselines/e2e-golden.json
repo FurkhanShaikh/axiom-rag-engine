@@ -1,0 +1,10 @@
+{
+  "eval": "e2e_golden",
+  "enforcement": "enforce",
+  "recorded_at": "2026-07-17",
+  "model": null,
+  "notes": "Deterministic gate: the --validate-only pass runs the retriever/scorer/ranker stages and the pre-LLM answerability gate with no LLM keys, so it can gate every PR. Every golden case must clear its deterministic expectation. The full keyed run (pass_rate, cost_usd) is gated nightly from a separate baseline once recorded.",
+  "metrics": {
+    "validate_pass_rate": { "floor": 1.0, "tolerance": 0.0 }
+  }
+}

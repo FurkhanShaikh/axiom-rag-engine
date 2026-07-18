@@ -1,0 +1,14 @@
+{
+  "eval": "semantic_verifier",
+  "enforcement": "report_only",
+  "recorded_at": null,
+  "model": "gpt-4o-mini",
+  "notes": "PLACEHOLDER FLOORS — not yet recorded. This baseline is report_only until the first keyed run on the production verifier model. To activate: run `python tasks.py evals semantic -- --model gpt-4o-mini --limit 200`, read the summary, set each floor a few points below the observed value (leaving the tolerance band for run-to-run noise), set recorded_at, and flip enforcement to \"enforce\". The floors below are the minimum bar a verification product should clear, not a measurement.",
+  "metrics": {
+    "unfaithful_recall": { "floor": 0.7, "tolerance": 0.05 },
+    "unfaithful_precision": { "floor": 0.7, "tolerance": 0.05 },
+    "unfaithful_f1": { "floor": 0.7, "tolerance": 0.05 },
+    "accuracy": { "floor": 0.75, "tolerance": 0.05 },
+    "error_rate": { "ceiling": 0.05, "tolerance": 0.02 }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "eval": "semantic_verifier",
+  "enforcement": "report_only",
+  "recorded_at": "2026-07-17",
+  "model": "openrouter/google/gemma-4-26b-a4b-it:free",
+  "sample_size": 30,
+  "notes": "Provisional reference point, NOT the production verifier. Recorded from a free OpenRouter model on a 30-example SciFact dev sample (seed 7) to prove the harness produces real numbers end-to-end. Observed: recall 0.857, precision 0.667, f1 0.750, accuracy 0.733, error_rate 0.0. Floors are set well below observed because n=30 gives wide confidence intervals and free endpoints are flaky. report_only for the same reasons - do not wire a per-PR gate to a shared free endpoint (it 429s under load). To promote: run a larger sample (200+) on a stable endpoint, tighten the floors, and flip to enforce. The production gpt-4o-mini baseline (semantic-verifier.json) remains unmeasured.",
+  "metrics": {
+    "unfaithful_recall": { "floor": 0.65, "tolerance": 0.1 },
+    "unfaithful_precision": { "floor": 0.5, "tolerance": 0.1 },
+    "unfaithful_f1": { "floor": 0.55, "tolerance": 0.1 },
+    "accuracy": { "floor": 0.6, "tolerance": 0.1 },
+    "error_rate": { "ceiling": 0.1, "tolerance": 0.05 }
+  }
+}
