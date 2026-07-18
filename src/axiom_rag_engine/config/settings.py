@@ -190,6 +190,24 @@ class Settings(BaseSettings):
         description="Domains to strip from the built-in authoritative list.",
     )
 
+    # ── Retrieval: hybrid (dense + BM25) ─────────────────────────────────
+    embedding_model: str | None = Field(
+        default=None,
+        description=(
+            "LiteLLM embedding model for hybrid retrieval (e.g. "
+            "'ollama/nomic-embed-text' or 'text-embedding-3-small'). When set, the "
+            "ranker fuses BM25 with dense cosine via reciprocal-rank fusion. "
+            "Unset (default) = BM25-only ranking. Dense retrieval helps most on "
+            "vocabulary-mismatch queries (colloquial query vs formal source); see "
+            "BENCHMARKS.md."
+        ),
+    )
+    rrf_k: int = Field(
+        default=60,
+        ge=1,
+        description="Reciprocal-rank-fusion constant for hybrid retrieval. 60 is the RRF-paper default.",
+    )
+
     # ── Verification ─────────────────────────────────────────────────────
     semantic_verification_enabled: bool = Field(
         default=True,

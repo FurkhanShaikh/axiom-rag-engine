@@ -1026,6 +1026,11 @@ async def get_status(request: Request) -> dict[str, Any]:
                 state, "default_verifier_model", settings.default_verifier_model
             ),
         },
+        "retrieval": {
+            "ranking_mode": "hybrid" if settings.embedding_model else "bm25",
+            "embedding_model": settings.embedding_model,
+            "rrf_k": settings.rrf_k,
+        },
         "observability": {
             "log_format": settings.log_format,
             "log_audit_events": settings.log_audit_events,

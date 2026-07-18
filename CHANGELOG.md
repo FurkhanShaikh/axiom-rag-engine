@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hybrid retrieval (opt-in).** Set `AXIOM_EMBEDDING_MODEL` (a LiteLLM embedding model, e.g. `ollama/nomic-embed-text` or `text-embedding-3-small`) to fuse BM25 with dense cosine similarity via reciprocal-rank fusion in the ranker. Empty (default) = BM25-only, so existing deployments are unaffected. Falls back to BM25 automatically if the embedder errors. `AXIOM_RRF_K` tunes the fusion constant. `GET /v1/status` reports the `retrieval` mode. Dense retrieval helps most on vocabulary-mismatch queries — see `BENCHMARKS.md`.
+- **Retrieval-quality eval (`evals/retrieval_eval.py`)** measuring recall@k / nDCG@10 / MRR over SciFact and BEIR datasets, with BM25 / dense / hybrid methods and a deterministic BM25 regression gate. `BENCHMARKS.md` records the measured BM25-vs-hybrid crossover.
+
 ## [0.1.0b2] - 2026-04-16
 
 ### Added

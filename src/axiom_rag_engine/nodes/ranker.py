@@ -19,6 +19,7 @@ from collections import Counter
 from functools import partial
 from typing import Any
 
+from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
 
@@ -221,6 +222,66 @@ def compute_ranking_score(
 
 
 # ---------------------------------------------------------------------------
+# Hybrid retrieval — reciprocal-rank fusion of BM25 and dense cosine
+# ---------------------------------------------------------------------------
+
+
+async def _apply_hybrid_fusion(
+    user_query: str,
+    ranked: list[dict[str, Any]],
+    embedding_model: str,
+    rrf_k: int,
+    audit: list[dict[str, Any]],
+) -> bool:
+    """Reorder ``ranked`` in place by RRF of the quality-aware BM25 order and a
+    dense (embedding cosine) order.
+
+    Returns True when fusion was applied, False when it was skipped or the
+    embedding call failed — in which case the caller keeps the BM25 order. The
+    ``ranking_score`` field is left untouched (the pre-LLM answerability gate
+    reads its absolute value); only the *order* changes, plus per-chunk
+    ``dense_score`` / ``fused_score`` for transparency.
+    """
+    from axiom_rag_engine.embeddings import cosine, embed_query_and_chunks
+
+    texts = [c.get("text", "") for c in ranked]
+    try:
+        query_vec, chunk_vecs = await embed_query_and_chunks(embedding_model, user_query, texts)
+    except Exception as exc:  # provider down, bad model, timeout — never break ranking
+        logger.warning(
+            "Hybrid retrieval embedding failed (%s: %s); falling back to BM25 order.",
+            type(exc).__name__,
+            exc,
+        )
+        audit.append(_audit("ranker_dense_error", {"model": embedding_model, "error": str(exc)}))
+        return False
+
+    dense = [cosine(query_vec, cv) for cv in chunk_vecs]
+    for chunk, score in zip(ranked, dense, strict=True):
+        chunk["dense_score"] = round(score, 4)
+
+    # Two orderings to fuse: arm A is the existing quality-aware BM25 ranking;
+    # arm B is pure dense similarity. Fusing on ranks needs no score calibration
+    # between the two different scales.
+    a_order = sorted(range(len(ranked)), key=lambda i: (-ranked[i]["ranking_score"], i))
+    b_order = sorted(range(len(ranked)), key=lambda i: (-dense[i], i))
+    a_rank = {idx: rank for rank, idx in enumerate(a_order)}
+    b_rank = {idx: rank for rank, idx in enumerate(b_order)}
+    for i, chunk in enumerate(ranked):
+        chunk["fused_score"] = round(
+            1.0 / (rrf_k + a_rank[i] + 1) + 1.0 / (rrf_k + b_rank[i] + 1), 6
+        )
+    ranked.sort(key=lambda c: (-c["fused_score"], c["chunk_id"]))
+    audit.append(
+        _audit(
+            "ranker_hybrid_fused",
+            {"model": embedding_model, "rrf_k": rrf_k, "chunk_count": len(ranked)},
+        )
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
 
@@ -286,8 +347,18 @@ async def ranker_node(state: GraphState) -> dict[str, Any]:
         }
         ranked.append(ranked_chunk)
 
-    # Sort by ranking_score descending, then trim to top-N.
-    ranked.sort(key=lambda c: c["ranking_score"], reverse=True)
+    # Hybrid retrieval is opt-in: only when an embedding model is configured and
+    # there are at least two chunks to reorder. It reorders by RRF of BM25 and
+    # dense cosine; any failure falls back cleanly to the BM25 order below.
+    settings = get_settings()
+    hybrid_applied = False
+    if settings.embedding_model and len(ranked) >= 2:
+        hybrid_applied = await _apply_hybrid_fusion(
+            user_query, ranked, settings.embedding_model, settings.rrf_k, audit
+        )
+    if not hybrid_applied:
+        # BM25-only order — the default and the fallback path.
+        ranked.sort(key=lambda c: (-c["ranking_score"], c.get("chunk_id", "")))
     trimmed = ranked[:max_ranked]
 
     audit.append(
@@ -297,6 +368,7 @@ async def ranker_node(state: GraphState) -> dict[str, Any]:
                 "total_scored": len(ranked),
                 "returned_top_n": len(trimmed),
                 "max_ranked_chunks": max_ranked,
+                "ranking_mode": "hybrid" if hybrid_applied else "bm25",
             },
         )
     )

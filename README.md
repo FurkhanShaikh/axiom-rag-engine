@@ -71,6 +71,8 @@ resolved configuration.
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
 | `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
 | `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
+| `AXIOM_EMBEDDING_MODEL` | _(empty)_ | LiteLLM embedding model to enable hybrid (BM25 + dense) ranking, e.g. `ollama/nomic-embed-text` or `text-embedding-3-small`. Empty = BM25-only. See [Hybrid retrieval](#hybrid-retrieval). |
+| `AXIOM_RRF_K` | `60` | Reciprocal-rank-fusion constant for hybrid ranking. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |
 | `AXIOM_CACHE_TTL_SECONDS` | `300` | Response cache TTL. |
 | `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for distributed cache. |
@@ -124,6 +126,36 @@ Tier 2 is named "Multi-Domain" rather than "Multi-Source" deliberately: it
 only establishes that a sentence draws on more than one domain. Detecting
 whether those sources actually *agree* requires an entailment check across
 citations, which is not yet implemented.
+
+## Hybrid retrieval
+
+By default the ranker scores retrieved chunks with **BM25** (lexical matching).
+Set `AXIOM_EMBEDDING_MODEL` to a LiteLLM embedding model to additionally score
+chunks by **dense** semantic similarity and fuse the two rankings with
+reciprocal-rank fusion (RRF):
+
+```bash
+# Local, no API cost (requires `ollama pull nomic-embed-text`)
+export AXIOM_EMBEDDING_MODEL=ollama/nomic-embed-text
+# Or a hosted embedder
+export AXIOM_EMBEDDING_MODEL=text-embedding-3-small   # needs OPENAI_API_KEY
+```
+
+**When it helps.** Dense retrieval earns its keep on *vocabulary mismatch* —
+when a colloquial query and the source that answers it share few words. On
+lexically-clean text BM25 already wins, so hybrid is opt-in. The measured
+crossover (BM25 wins on clean text, hybrid wins on vocabulary-mismatch text) is
+in [BENCHMARKS.md](BENCHMARKS.md).
+
+**Safety.** Hybrid is off unless `AXIOM_EMBEDDING_MODEL` is set, so existing
+deployments are unaffected. If the embedder is unreachable or errors, the ranker
+logs it and falls back to BM25 for that request — retrieval never breaks. Each
+ranked chunk carries `dense_score` and `fused_score` in the debug audit trail,
+and `ranker_complete` reports `ranking_mode` (`bm25` or `hybrid`).
+
+**Cost.** With an embedding model set, each request makes one batched embedding
+call over the query plus its retrieved chunks. A hosted embedder adds ~100–300 ms;
+a local Ollama model is slower but free.
 
 ## Verification sources
 
