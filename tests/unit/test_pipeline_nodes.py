@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from axiom_rag_engine.nodes.ranker import (
     _tokenize,
     compute_corpus_idf,
@@ -31,8 +33,12 @@ from axiom_rag_engine.nodes.retriever import (
     strip_html,
 )
 from axiom_rag_engine.nodes.scorer import (
+    _DEFAULT_PRIMARY_DOMAINS,
     _normalize_domain,
+    build_primary_domain_set,
     compute_combined_score,
+    is_authoritative_domain,
+    is_primary_domain,
     score_chunk_quality,
     score_source_quality,
     scorer_node,
@@ -741,6 +747,111 @@ class TestPunycodeDomainNormalization:
     def test_real_subdomain_still_matches(self) -> None:
         """Legitimate subdomain of authoritative domain still scores 0.85."""
         assert score_source_quality("blog.arxiv.org") == 0.85
+
+
+class TestGovernmentDomainRule:
+    """Authority-by-TLD for official government / treaty-org domains (2.3).
+
+    These zones restrict registration to eligible official bodies, so they are a
+    reliable Tier-1 signal without a per-agency allowlist — but the rule must be
+    tight enough that a lookalike cannot reach Tier 1 through it.
+    """
+
+    # Globally restricted TLDs: no subdomain / allowlist needed.
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "nih.gov",
+            "www.fda.gov",
+            "cdc.gov",
+            "who.int",  # treaty org
+            "army.mil",
+            "irs.gov",
+        ],
+    )
+    def test_restricted_tld_is_primary_and_authoritative(self, domain: str) -> None:
+        assert is_primary_domain(domain, set()) is True
+        assert is_authoritative_domain(domain, set()) is True
+        assert score_source_quality(domain) == 0.9
+
+    # Curated national government second-levels, including bare apex forms.
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "gov.uk",  # apex
+            "www.gov.uk",
+            "service.gov.uk",
+            "gob.mx",
+            "datos.gob.mx",
+            "gouv.fr",
+            "govt.nz",
+            "canada.ca",
+            "www.canada.ca",
+            "admin.ch",
+        ],
+    )
+    def test_curated_national_gov_is_primary(self, domain: str) -> None:
+        assert is_primary_domain(domain, set()) is True
+        assert score_source_quality(domain) == 0.9
+
+    # The safety boundary: lookalikes must NOT reach Tier 1 via the TLD rule.
+    # `.gov.io` is the canonical trap — `.io` runs no restricted gov namespace,
+    # so anyone could register under it.
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "myblog.gov.io",
+            "gov.io",
+            "gov.com",
+            "notagov.org",
+            "nih.gov.evil.com",  # subdomain trick: real TLD is .com
+            "fakegov.com",
+            "government.example.com",
+        ],
+    )
+    def test_lookalikes_are_not_primary(self, domain: str) -> None:
+        assert is_primary_domain(domain, set()) is False
+        assert is_authoritative_domain(domain, set()) is False
+
+
+class TestPrimaryDomainPacks:
+    """The curated primary-source packs (standards bodies, official docs, IGOs)."""
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "w3.org",
+            "rfc-editor.org",
+            "iso.org",
+            "un.org",
+            "worldbank.org",
+            "docs.python.org",
+            "developer.mozilla.org",
+            "learn.microsoft.com",
+            "go.dev",
+            "kubernetes.io",
+        ],
+    )
+    def test_curated_pack_domain_is_primary(self, domain: str) -> None:
+        # is_primary_domain takes the resolved primary set (defaults included).
+        assert is_primary_domain(domain, _DEFAULT_PRIMARY_DOMAINS) is True
+
+    def test_pack_subdomain_is_primary(self) -> None:
+        assert is_primary_domain("sub.developer.apple.com", _DEFAULT_PRIMARY_DOMAINS) is True
+
+    def test_reference_domain_is_not_primary(self) -> None:
+        """Reference sources (Wikipedia, arXiv) are Tier-2 max, never primary."""
+        primary = build_primary_domain_set({})
+        assert is_primary_domain("en.wikipedia.org", primary) is False
+        assert is_primary_domain("arxiv.org", primary) is False
+        # ...but they remain authoritative (0.9 source quality).
+        assert score_source_quality("en.wikipedia.org") == 0.9
+
+    def test_build_primary_set_honors_exclusions(self) -> None:
+        """AXIOM_EXCLUDE_DEFAULT_DOMAINS drops a pack domain from the primary set."""
+        primary = build_primary_domain_set({"exclude_default_domains": ["iso.org"]})
+        assert "iso.org" not in primary
+        assert is_primary_domain("iso.org", primary) is False
 
 
 # ===========================================================================

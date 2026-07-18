@@ -41,19 +41,40 @@ logger = logging.getLogger("axiom_rag_engine.scorer")
 #       scorer for the quality score (both tiers receive 0.9 quality boost).
 # ---------------------------------------------------------------------------
 
+# Primary (Tier-1-eligible) sources. Government and treaty-org domains are
+# matched by TLD rule below (_is_government_domain) rather than listed here, so
+# this set only needs the official sources that live on ordinary TLDs. Operators
+# extend it per-request via app_config.authoritative_domains.
 _DEFAULT_PRIMARY_DOMAINS: set[str] = {
-    # Official government / intergovernmental health bodies
-    "nih.gov",
-    "cdc.gov",
-    "who.int",
-    "europa.eu",
-    # Official standards and specifications
+    # Intergovernmental / multilateral (non-.int)
+    "europa.eu",  # EU institutions
+    "un.org",
+    "worldbank.org",
+    "imf.org",
+    "oecd.org",
+    "unesco.org",
+    "wto.org",
+    # Official standards bodies and specifications
     "w3.org",
+    "whatwg.org",
     "ietf.org",
     "rfc-editor.org",
-    # Official language / platform documentation
+    "iso.org",
+    "iec.ch",
+    "unicode.org",
+    "ecma-international.org",
+    # Official language / platform / vendor documentation
     "docs.python.org",
     "developer.mozilla.org",
+    "nodejs.org",
+    "go.dev",
+    "rust-lang.org",
+    "kubernetes.io",
+    "docs.oracle.com",
+    "learn.microsoft.com",
+    "developer.apple.com",
+    "developer.android.com",
+    "postgresql.org",
 }
 
 _DEFAULT_REFERENCE_DOMAINS: set[str] = {
@@ -145,17 +166,89 @@ def _normalize_domain(domain: str) -> str:
     return ".".join(normalized)
 
 
+# Globally restricted-registration TLDs reserved for governments / militaries /
+# treaty organizations. A domain cannot obtain one without official eligibility,
+# so an ``endswith`` match is a safe Tier-1 signal with no per-agency allowlist.
+_GOVERNMENT_TLDS: tuple[str, ...] = (".gov", ".mil", ".int")
+
+# Curated second-level government namespaces. Only countries that actually
+# *restrict* a government second-level domain are listed — a blanket
+# ``.gov.<cc>`` rule would wrongly trust e.g. ``gov.io`` (`.io` runs no such
+# restricted namespace). Extend deliberately, not by pattern.
+_GOVERNMENT_SUFFIXES: frozenset[str] = frozenset(
+    {
+        # gov.<cc>
+        "gov.uk",
+        "gov.au",
+        "gov.in",
+        "gov.br",
+        "gov.za",
+        "gov.sg",
+        "gov.hk",
+        "gov.il",
+        "gov.ie",
+        "gov.pl",
+        "gov.pt",
+        "gov.it",
+        "gov.gr",
+        "gov.sa",
+        # gob.<cc> (Spanish-speaking states)
+        "gob.mx",
+        "gob.es",
+        "gob.ar",
+        "gob.cl",
+        "gob.pe",
+        "gob.pa",
+        # other national government forms
+        "gouv.fr",
+        "govt.nz",
+        "gc.ca",
+        "canada.ca",
+        "admin.ch",
+        "bund.de",
+        "gv.at",
+        "overheid.nl",
+    }
+)
+
+
+def _is_government_domain(domain_norm: str) -> bool:
+    """True for official government / treaty-org domains, by TLD rule.
+
+    ``domain_norm`` must already be normalized (lowercased, punycode-decoded).
+    Safe against lookalikes: these zones restrict registration to eligible
+    official bodies, so no attacker-controlled domain can match.
+    """
+    if domain_norm.endswith(_GOVERNMENT_TLDS):
+        return True
+    return any(
+        domain_norm == suffix or domain_norm.endswith("." + suffix)
+        for suffix in _GOVERNMENT_SUFFIXES
+    )
+
+
 def is_authoritative_domain(domain: str, authoritative: set[str]) -> bool:
     """Return True when the domain is in the authoritative set or a subdomain of one."""
     domain_norm = _normalize_domain(domain)
+    if _is_government_domain(domain_norm):
+        return True
     if domain_norm in authoritative:
         return True
     return any(domain_norm.endswith("." + auth) for auth in authoritative)
 
 
 def is_primary_domain(domain: str, primary: set[str]) -> bool:
-    """Return True when the domain is a primary (Tier-1-eligible) source."""
-    return is_authoritative_domain(domain, primary)
+    """Return True when the domain is a primary (Tier-1-eligible) source.
+
+    Primary = an official government / treaty-org domain (by TLD rule) OR a
+    member of the curated primary set (or a subdomain of one).
+    """
+    domain_norm = _normalize_domain(domain)
+    if _is_government_domain(domain_norm):
+        return True
+    if domain_norm in primary:
+        return True
+    return any(domain_norm.endswith("." + p) for p in primary)
 
 
 def score_source_quality(
@@ -179,6 +272,9 @@ def score_source_quality(
         low_quality = _DEFAULT_LOW_QUALITY_DOMAINS
 
     domain_norm = _normalize_domain(domain)
+    # Official government / treaty-org domains score as authoritative by TLD rule.
+    if _is_government_domain(domain_norm):
+        return 0.9
     if domain_norm in authoritative:
         return 0.9
     if domain_norm in low_quality:

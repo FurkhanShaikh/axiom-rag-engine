@@ -111,7 +111,7 @@ Each tier states exactly what the engine checked — no more.
 
 | Tier | Label | What it proves | What it does *not* prove |
 |---|---|---|---|
-| 1 | Authoritative | Quote is verbatim in the source, faithfully represents it, and at least one cited domain is on the configured primary-source list | That the primary-source list is complete — a genuinely authoritative domain that isn't on it lands at Tier 3 |
+| 1 | Authoritative | Quote is verbatim in the source, faithfully represents it, and at least one cited domain is an official government / treaty-org domain (`.gov`, `.mil`, `.int`, or a recognized national government namespace) **or** on the configured primary-source list | That the primary-source list is complete — a genuinely authoritative domain that isn't recognized lands at Tier 3 |
 | 2 | Multi-Domain | Quote is verbatim, faithfully represents the source, and the sentence cites ≥2 distinct domains | **That those domains agree.** This is coverage, not corroboration — the sources are not compared to each other |
 | 3 | Model Assisted | Quote is verbatim and faithfully represents the source | Any authority or cross-source claim |
 | 4 | Misrepresented | Quote is verbatim, but the claim distorts what the source says | — |
@@ -122,6 +122,16 @@ Tier 1 and Tier 2 are deterministic judgements about **sources**, computed
 from domain metadata — never inferred by a model. Tiers 3–5 describe the
 **claim-to-source** relationship: Tier 5 is a deterministic substring check
 (no LLM involved), Tier 4 is the model's faithfulness verdict.
+
+A domain qualifies as primary (Tier-1-eligible) two ways: it sits on the curated
+primary-source list (intergovernmental bodies, standards organizations, official
+platform docs — extend it with `AXIOM_AUTHORITATIVE_DOMAINS`), **or** it belongs
+to a restricted-registration government namespace. The namespace rule trusts the
+globally restricted TLDs `.gov` / `.mil` / `.int` plus a curated allowlist of
+national government second-levels (`gov.uk`, `gob.mx`, `gouv.fr`, `canada.ca`, …).
+It is deliberately *not* a blanket `gov.<any-cctld>` match: `.io` and similar
+open-registration ccTLDs run no restricted government zone, so a lookalike like
+`records.gov.io` stays out of Tier 1.
 
 By default Tier 2 is "Multi-Domain": it only establishes that a sentence draws
 on more than one domain, not that those sources *agree*. Set
