@@ -53,10 +53,12 @@ jobs:
         run: uv run pytest -m "not integration" --cov=axiom_rag_engine --cov-report=term-missing
 
   evals-gate:
-    # Deterministic quality gate — no LLM keys, no cost. Runs the golden set
-    # through the retriever/scorer/ranker stages and the pre-LLM answerability
-    # gate, and fails if any case regresses. The keyed semantic + full e2e evals
-    # run nightly (see .github/workflows/nightly-evals.yml), not here.
+    # Deterministic quality gates — no LLM keys, no cost. Two checks:
+    #   1. Golden set through the retriever/scorer/ranker + pre-LLM
+    #      answerability gate (every case must clear its expectation).
+    #   2. BM25 retrieval quality over SciFact (recall@k / nDCG / MRR must not
+    #      regress) — the baseline hybrid retrieval must beat.
+    # The keyed semantic + full e2e evals run nightly (nightly-evals.yml).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -66,10 +68,10 @@ jobs:
         run: uv python install 3.11
       - name: Install dependencies
         run: uv sync --frozen
-      - name: Regression gate (deterministic golden set)
+      - name: Regression gates (golden answerability + BM25 retrieval)
         env:
           AXIOM_ENV: development
-        run: uv run python evals/e2e_eval.py --validate-only --gate
+        run: uv run python tasks.py evals gate
 
   security:
     runs-on: ubuntu-latest

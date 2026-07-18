@@ -1,0 +1,15 @@
+{
+  "eval": "retrieval",
+  "method": "bm25",
+  "enforcement": "enforce",
+  "recorded_at": "2026-07-17",
+  "dataset": "scifact/dev",
+  "sample": "all 188 labeled claims",
+  "notes": "BM25 retrieval quality over the full SciFact dev set, using the production ranker's tokenizer, corpus IDF, and K1/B constants. Fully deterministic (fixed corpus, no LLM), so this gates every PR with no keys and tight floors. Observed: recall@10=0.916, recall@20=0.948, nDCG@10=0.797, MRR=0.763. Floors sit ~1.5 points below observed with a small tolerance to absorb cross-platform float rounding; a real ranker regression moves these by far more. This is also the bar hybrid retrieval (roadmap 1.1) and a reranker (1.2) must beat: note BM25 is already strong here because SciFact claims are lexically clean, so hybrid must earn its gains on this dataset.",
+  "metrics": {
+    "recall_at_10": { "floor": 0.9, "tolerance": 0.005 },
+    "recall_at_20": { "floor": 0.93, "tolerance": 0.005 },
+    "ndcg_at_10": { "floor": 0.78, "tolerance": 0.005 },
+    "mrr": { "floor": 0.74, "tolerance": 0.005 }
+  }
+}

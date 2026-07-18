@@ -11,6 +11,18 @@ normalization, ranking, or tier logic.
 |---|---|---|---|
 | 1 | `semantic_verifier_eval.py` | [SciFact](https://github.com/allenai/scifact) (dev split) | Semantic verifier accuracy: does it pass SUPPORTed claims and fail CONTRADICTed ones? |
 | 2 | `e2e_eval.py` | `golden/seed.jsonl` (committed, hand-curated) | Full pipeline behavior: answerability, tier assignment, Tier-5 leakage, non-Latin support |
+| 3 | `retrieval_eval.py` | SciFact (dev split) | Retrieval quality: does the ranker surface the gold evidence document near the top? (recall@k, nDCG@10, MRR) |
+
+### Why SciFact for Layer 3
+
+SciFact's evidence labels name the corpus document(s) that answer each claim —
+exactly the relevance signal an IR eval needs. Layer 3 ranks the whole corpus
+per claim (reusing the production BM25 tokenizer, IDF, and constants) and scores
+whether the gold documents land near the top. It is fully deterministic and
+needs no keys, so it gates every PR. It is also the baseline hybrid retrieval
+and a reranker must beat — see [BENCHMARKS.md](../BENCHMARKS.md). BM25 is already
+strong on SciFact (lexically-clean scientific text), which makes it an honest,
+demanding bar.
 
 ### Why SciFact for Layer 1
 
@@ -51,7 +63,24 @@ python tasks.py evals e2e -- --model gpt-4o-mini
 # Layer 2 without any LLM: validates seed schema + runs the deterministic
 # retriever/scorer/ranker stages and reports the pre-LLM answerability gate
 python tasks.py evals e2e -- --validate-only
+
+# Layer 3 — retrieval quality (ranks the SciFact corpus per claim)
+python tasks.py evals retrieval                    # BM25, 100-claim sample (no LLM)
+python tasks.py evals retrieval -- --limit 0       # BM25, all 188 labeled claims
+
+# Dense / hybrid need a local Ollama embedder (default nomic-embed-text):
+#   ollama pull nomic-embed-text
+# The corpus is embedded once and cached to evals/data/embeddings/ (gitignored),
+# so the first dense/hybrid run takes ~5 min and later runs are instant.
+python tasks.py evals retrieval -- --method dense  --limit 0
+python tasks.py evals retrieval -- --method hybrid --limit 0
 ```
+
+**Retrieval methods.** `bm25` is the production ranker (deterministic, no keys,
+the enforced gate). `dense` is cosine similarity over Ollama embeddings.
+`hybrid` fuses BM25 and dense via reciprocal-rank fusion. On SciFact, BM25 wins
+— see [BENCHMARKS.md](../BENCHMARKS.md) for the comparison and why. Dense/hybrid
+are research runs, not gated.
 
 Results are written to `evals/results/<eval>-<timestamp>.json` (gitignored)
 with one record per example, so failures can be inspected and diffed
@@ -91,20 +120,24 @@ per-metric bound (`floor` or `ceiling`) plus a `tolerance` slack band for
 LLM run-to-run noise. See `evals/gate.py` for the full contract.
 
 ```bash
-# Deterministic gate — no LLM keys, runs on every PR. Every golden case must
-# clear its pre-LLM answerability expectation.
+# Deterministic gates — no LLM keys, run on every PR. Two checks:
+#   1. every golden case clears its pre-LLM answerability expectation
+#   2. BM25 retrieval quality (recall@k / nDCG / MRR) does not regress
 python tasks.py evals gate
 
 # Keyed semantic gate — nightly. report_only until real floors are recorded.
 python tasks.py evals semantic -- --model gpt-4o-mini --limit 200 --gate
+
+# Retrieval gate on its own (also part of `evals gate`)
+python tasks.py evals retrieval -- --limit 0 --gate
 ```
 
 A baseline is `enforce` (a regression fails CI, exit 1) or `report_only`
-(prints the comparison but never fails). `e2e-golden.json` is `enforce` — it
-gates on the deterministic `validate_pass_rate` and needs no keys.
-`semantic-verifier.json` ships `report_only` with placeholder floors until the
-first keyed run records defensible numbers; see `BENCHMARKS.md` for that
-one-time activation step.
+(prints the comparison but never fails). Two baselines are `enforce` and need
+no keys: `e2e-golden.json` (deterministic `validate_pass_rate`) and
+`retrieval-bm25.json` (deterministic recall/nDCG/MRR). `semantic-verifier.json`
+ships `report_only` with placeholder floors until the first keyed run records
+defensible numbers; see `BENCHMARKS.md` for that one-time activation step.
 
 The gate's exit code is the CI signal: 0 = pass, 1 = a regression on an
 enforcing baseline (or a failing golden-case expectation).

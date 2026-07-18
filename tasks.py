@@ -214,13 +214,16 @@ def evals() -> None:
         "download": "evals/download_datasets.py",
         "semantic": "evals/semantic_verifier_eval.py",
         "e2e": "evals/e2e_eval.py",
+        "retrieval": "evals/retrieval_eval.py",
     }
-    # `gate` is the CI entry point: the deterministic e2e gate, no LLM keys.
+    # `gate` is the CI entry point: the two deterministic gates, no LLM keys —
+    # end-to-end golden set answerability + retrieval quality (BM25 over SciFact).
     if args and args[0] == "gate":
         _run("uv", "run", "python", "evals/e2e_eval.py", "--validate-only", "--gate")
+        _run("uv", "run", "python", "evals/retrieval_eval.py", "--limit", "0", "--gate")
         return
     if not args or args[0] not in scripts:
-        _echo("Usage: python tasks.py evals <download|semantic|e2e|gate> [-- <args>]")
+        _echo("Usage: python tasks.py evals <download|semantic|e2e|retrieval|gate> [-- <args>]")
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]
     _run("uv", "run", "python", scripts[args[0]], *passthrough)

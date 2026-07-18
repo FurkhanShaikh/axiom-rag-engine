@@ -10,8 +10,25 @@ it — so the numbers reflect what a caller actually gets.
 
 | Layer | What it answers | Dataset | Needs LLM keys |
 |---|---|---|---|
-| Semantic verifier accuracy | Does the verifier pass faithful claims and fail unfaithful ones? | [SciFact](https://github.com/allenai/scifact) dev split | Yes |
+| Retrieval quality | Does the ranker surface the right sources near the top? | [SciFact](https://github.com/allenai/scifact) dev split | No |
+| Semantic verifier accuracy | Does the verifier pass faithful claims and fail unfaithful ones? | SciFact dev split | Yes |
 | End-to-end golden set | Does the full pipeline answer, tier, and gate as specified? | `evals/golden/seed.jsonl` (16 diagnostic cases) | Deterministic subset: no |
+
+### Retrieval metrics
+
+Verification can only bless what retrieval finds, so ranking quality is measured
+first. SciFact labels each claim with the corpus document(s) that answer it, so
+the ranker is scored as a standard IR system:
+
+| Metric | Meaning |
+|---|---|
+| `recall@k` | Fraction of gold documents found in the top k |
+| `nDCG@10` | Ranking quality with position discounting (higher = gold docs nearer the top) |
+| `MRR` | Mean reciprocal rank of the first gold document |
+
+This runs with no keys and is fully deterministic, so it gates every PR — and
+it is the baseline that hybrid retrieval and a reranker (roadmap Phase 1) must
+beat.
 
 ### Semantic verifier metrics
 
@@ -30,9 +47,45 @@ launders them as verified.
 
 ## Results
 
-> **Not yet recorded.** These tables are populated from the first keyed run on
-> the production verifier model. Until then the semantic gate ships
-> `report_only` and does not block CI. See **Recording the baseline** below.
+### Retrieval — SciFact dev
+
+| Method | claims | recall@1 | recall@5 | recall@10 | recall@20 | nDCG@10 | MRR |
+|---|---|---|---|---|---|---|---|
+| **BM25** (production ranker) | 188 | **0.656** | **0.870** | **0.916** | **0.948** | **0.797** | **0.763** |
+| hybrid (BM25 + dense, RRF) | 188 | 0.587 | 0.842 | 0.904 | 0.944 | 0.758 | 0.719 |
+| dense (`nomic-embed-text`) | 188 | 0.498 | 0.714 | 0.774 | 0.824 | 0.645 | 0.615 |
+
+**Finding: hybrid does not beat BM25 on SciFact.** BM25 wins every metric;
+adding dense retrieval via reciprocal-rank fusion makes it slightly *worse*
+because the local embedder's signal is weaker and drags the fusion down.
+
+This is a genuine result, not an implementation gap — the RRF math is unit-
+tested, and dense does add *some* orthogonal value: it rescues 7 of 188 claims
+BM25 misses in the top 10. But the complementary signal is thin. An oracle that
+always picked the better ranker per query would reach recall@10 ≈ 0.968 vs
+BM25's 0.931 — an upside of only **~3.7 points**, which real RRF can't capture
+because it pays a larger penalty on the 35 claims where dense ranks the gold
+document poorly.
+
+Why: SciFact claims are lexically clean scientific text, exactly where BM25
+excels and general-purpose embeddings add little. Hybrid retrieval's real
+advantage is vocabulary mismatch (paraphrase, synonyms, colloquial vs formal),
+which this dataset under-represents. **The recommendation is not to wire hybrid
+into production on this evidence** — first get a benchmark that stresses
+semantic matching and/or a stronger domain-appropriate embedder, then re-measure
+with the same eval (`--method hybrid`). The measurement did its job: it stopped
+a feature that doesn't help from shipping.
+
+Only the **BM25** row is an enforced per-PR gate (deterministic, no keys); a
+ranker change that drops any metric fails CI. Dense/hybrid are research runs
+(they need a local embedder) and are not gated.
+
+### Verification
+
+> **Not yet recorded for the production model.** The semantic table is populated
+> from the first keyed run on the production verifier. Until then the semantic
+> gate ships `report_only` and does not block CI. See **Recording the baseline**
+> below.
 
 ### Semantic verifier — SciFact dev
 
