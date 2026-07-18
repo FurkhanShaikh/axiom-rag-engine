@@ -213,6 +213,16 @@ class Settings(BaseSettings):
         default=True,
         description="Server policy for semantic verification (Stage 2).",
     )
+    corroboration_enabled: bool = Field(
+        default=False,
+        description=(
+            "When true, a sentence reaches Tier 2 only if >=2 distinct-domain sources "
+            "independently corroborate its central claim (an extra LLM check over the "
+            "cited quotes). Multi-domain sentences that merely cover different aspects "
+            "drop to Tier 3. Default false keeps Tier 2 as multi-domain coverage. "
+            "Adds one verifier call per Tier-2-candidate sentence."
+        ),
+    )
     min_usable_ranking_score: float = Field(
         default=0.15,
         ge=0.0,

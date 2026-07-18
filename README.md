@@ -79,6 +79,7 @@ resolved configuration.
 | `AXIOM_CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins. |
 | `AXIOM_DOCS_ENABLED` | `true` | Set `false` to disable /docs and /redoc. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
+| `AXIOM_CORROBORATION_ENABLED` | `false` | When true, Tier 2 requires ≥2 sources to *corroborate* the claim (an extra verifier call), not just cite ≥2 domains. See [Verification tiers](#verification-tiers). |
 | `AXIOM_FETCH_FULL_PAGES` | `true` | Verify citations against full page text rather than search snippets. See [Verification sources](#verification-sources). |
 | `AXIOM_MAX_RAW_CONTENT_CHARS` | `200000` | Per-document cap on full page text. Oversized pages are truncated, not dropped. |
 | `AXIOM_AUDIT_RETENTION` | `0` | Retain the last N audit trails in memory for `/v1/audits/{id}`. |
@@ -122,10 +123,14 @@ from domain metadata — never inferred by a model. Tiers 3–5 describe the
 **claim-to-source** relationship: Tier 5 is a deterministic substring check
 (no LLM involved), Tier 4 is the model's faithfulness verdict.
 
-Tier 2 is named "Multi-Domain" rather than "Multi-Source" deliberately: it
-only establishes that a sentence draws on more than one domain. Detecting
-whether those sources actually *agree* requires an entailment check across
-citations, which is not yet implemented.
+By default Tier 2 is "Multi-Domain": it only establishes that a sentence draws
+on more than one domain, not that those sources *agree*. Set
+`AXIOM_CORROBORATION_ENABLED=true` to enforce genuine corroboration — a Tier-2
+candidate then runs an extra verifier check, and reaches Tier 2 only if ≥2
+distinct sources independently confirm the claim's central fact; sentences whose
+sources merely cover different aspects drop to Tier 3. This adds one verifier
+call per Tier-2-candidate sentence and fails safe (a check error downgrades to
+Tier 3 rather than claiming corroboration it could not verify).
 
 ## Hybrid retrieval
 
