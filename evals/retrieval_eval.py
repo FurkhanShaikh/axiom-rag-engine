@@ -105,11 +105,35 @@ def load_corpus() -> Corpus:
     return Corpus(doc_ids=doc_ids, texts=texts)
 
 
-def load_queries(split: str = "dev") -> list[Query]:
+_PARAPHRASE_PATH = SCIFACT_DIR / "paraphrases_dev.jsonl"
+
+
+def _load_paraphrases() -> dict[str, str]:
+    """claim_id -> paraphrased query text, if the cache exists."""
+    if not _PARAPHRASE_PATH.exists():
+        _echo(
+            f"Paraphrase cache not found at {_PARAPHRASE_PATH}. "
+            "Run: uv run python evals/make_paraphrases.py"
+        )
+        sys.exit(1)
+    mapping: dict[str, str] = {}
+    for line in _PARAPHRASE_PATH.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            if row.get("paraphrase"):
+                mapping[str(row["claim_id"])] = row["paraphrase"]
+    return mapping
+
+
+def load_queries(split: str = "dev", *, paraphrased: bool = False) -> list[Query]:
     path = SCIFACT_DIR / f"claims_{split}.jsonl"
     if not path.exists():
         _echo(f"SciFact claims not found in {SCIFACT_DIR}. Run: python tasks.py evals download")
         sys.exit(1)
+    # In paraphrased mode, keep only claims that have a cached paraphrase, and
+    # swap in the reworded text — so the original vs. paraphrased A/B compares
+    # the exact same claim set with lexical overlap as the only difference.
+    paraphrases = _load_paraphrases() if paraphrased else {}
     queries: list[Query] = []
     with path.open(encoding="utf-8") as fh:
         for line in fh:
@@ -119,13 +143,14 @@ def load_queries(split: str = "dev") -> list[Query]:
             if not relevant:
                 # Only labeled claims can be scored for retrieval.
                 continue
-            queries.append(
-                Query(
-                    claim_id=str(claim["id"]),
-                    text=claim["claim"],
-                    relevant_doc_ids=relevant,
-                )
-            )
+            claim_id = str(claim["id"])
+            if paraphrased:
+                if claim_id not in paraphrases:
+                    continue
+                text = paraphrases[claim_id]
+            else:
+                text = claim["claim"]
+            queries.append(Query(claim_id=claim_id, text=text, relevant_doc_ids=relevant))
     return queries
 
 
@@ -353,10 +378,15 @@ def run(
     split: str,
     gate_baseline: Path | None,
     embed_model: str,
+    paraphrased: bool = False,
 ) -> int:
     corpus = load_corpus()
-    queries = load_queries(split)
-    _echo(f"Loaded corpus={len(corpus.doc_ids)} docs, labeled claims={len(queries)} ({split})")
+    queries = load_queries(split, paraphrased=paraphrased)
+    query_kind = "paraphrased" if paraphrased else "original"
+    _echo(
+        f"Loaded corpus={len(corpus.doc_ids)} docs, "
+        f"labeled claims={len(queries)} ({split}, {query_kind} queries)"
+    )
 
     rng = random.Random(seed)  # noqa: S311 - reproducible sampling, not crypto
     rng.shuffle(queries)
@@ -400,13 +430,15 @@ def run(
     summary = _summarize(results)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"retrieval-{method}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    tag = "paraphrased" if paraphrased else "original"
+    out_path = RESULTS_DIR / f"retrieval-{method}-{tag}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out_path.write_text(
         json.dumps(
             {
                 "eval": "retrieval",
                 "method": method,
                 "dataset": f"scifact/{split}",
+                "query_kind": tag,
                 "seed": seed,
                 "elapsed_s": round(elapsed, 1),
                 "summary": summary,
@@ -456,6 +488,12 @@ def main() -> None:
         help="Ollama embedding model for dense/hybrid methods.",
     )
     parser.add_argument(
+        "--paraphrased",
+        action="store_true",
+        help="Query with cached paraphrases (evals/make_paraphrases.py) instead of "
+        "original claims — the controlled vocabulary-mismatch A/B.",
+    )
+    parser.add_argument(
         "--gate",
         nargs="?",
         const=str(BASELINE_PATH),
@@ -465,7 +503,17 @@ def main() -> None:
     )
     args = parser.parse_args()
     baseline = Path(args.gate) if args.gate else None
-    sys.exit(run(args.method, args.limit, args.seed, args.split, baseline, args.embed_model))
+    sys.exit(
+        run(
+            args.method,
+            args.limit,
+            args.seed,
+            args.split,
+            baseline,
+            args.embed_model,
+            paraphrased=args.paraphrased,
+        )
+    )
 
 
 if __name__ == "__main__":

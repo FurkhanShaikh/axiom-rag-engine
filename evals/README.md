@@ -82,6 +82,17 @@ the enforced gate). `dense` is cosine similarity over Ollama embeddings.
 — see [BENCHMARKS.md](../BENCHMARKS.md) for the comparison and why. Dense/hybrid
 are research runs, not gated.
 
+**Vocabulary-mismatch A/B.** `make_paraphrases.py` rewrites claims with synonyms
+(via a local Ollama model) to lower their lexical overlap with the gold doc,
+isolating vocabulary mismatch — a proxy for colloquial web-search queries. Run
+`--method hybrid --paraphrased` vs. the original to see the crossover where
+hybrid overtakes BM25. See BENCHMARKS.md → "When does hybrid win?".
+
+```bash
+uv run python evals/make_paraphrases.py --limit 80        # one-time, needs Ollama
+python tasks.py evals retrieval -- --method hybrid --paraphrased --limit 0
+```
+
 Results are written to `evals/results/<eval>-<timestamp>.json` (gitignored)
 with one record per example, so failures can be inspected and diffed
 between runs.

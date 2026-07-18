@@ -80,6 +80,57 @@ Only the **BM25** row is an enforced per-PR gate (deterministic, no keys); a
 ranker change that drops any metric fails CI. Dense/hybrid are research runs
 (they need a local embedder) and are not gated.
 
+#### When does hybrid win? A controlled vocabulary-mismatch A/B
+
+The SciFact-native result ("hybrid loses") is not the whole story. Two follow-up
+experiments isolate *when* dense retrieval helps.
+
+**1. Diagnostic (real data, no manipulation).** Grouping the 188 claims by
+retrieval outcome and measuring the lexical overlap between each claim and its
+gold document:
+
+| outcome | n | mean query→gold overlap |
+|---|---|---|
+| both BM25 & dense find it | 140 | 0.669 |
+| BM25 only | 35 | 0.573 |
+| **dense rescues (BM25 missed)** | 7 | **0.342** |
+| neither | 6 | 0.257 |
+
+Dense rescues exactly the low-overlap claims — half the lexical overlap of what
+BM25 handles. Dense's value is vocabulary-mismatch robustness.
+
+**2. Causal A/B (paraphrased queries).** Rewording 80 claims with synonyms lowers
+their lexical overlap with the gold document (0.64 → 0.51, −20%) while keeping
+the answer document the same — isolating vocabulary mismatch. Matched on the
+same 80 claims:
+
+| method | original (r@10 / nDCG@10 / MRR) | paraphrased (r@10 / nDCG@10 / MRR) |
+|---|---|---|
+| BM25 | 0.906 / 0.783 / 0.746 | 0.877 / 0.764 / 0.740 |
+| dense | 0.811 / 0.690 / 0.662 | 0.833 / 0.713 / 0.681 |
+| **hybrid** | 0.877 / 0.762 / 0.735 | **0.880 / 0.783 / 0.766** |
+
+**The crossover:** on original queries hybrid trails BM25 (nDCG −2.0, MRR −1.1);
+on paraphrased queries hybrid overtakes it (nDCG **+1.9**, MRR **+2.6**). BM25
+degrades under paraphrase (recall@10 −2.9) while hybrid holds flat — dense
+compensates when lexical matching falters.
+
+**What this means for Axiom.** Production retrieval is web search: colloquial
+user queries against formal pages — a *high* vocabulary-mismatch regime, exactly
+where hybrid wins. So hybrid retrieval is worth pursuing for the real workload,
+even though it loses on lexically-clean SciFact.
+
+**Honest caveats.** Magnitudes are modest (n=80, a small local embedder
+`nomic-embed-text`), so treat the numbers as directional, not precise. The
+paraphrase manipulation also confounds two effects — it lowers lexical overlap
+(hurts BM25) *and* makes the terse SciFact claims more fluent (helps the
+embedder); the clean diagnostic above isolates the overlap mechanism on its own.
+The recommendation is therefore **not** an immediate production commit but the
+next measurement: build a web-search-flavored retrieval eval (real colloquial
+queries) and/or try a stronger embedder, then re-run `--method hybrid`. The
+machinery is in place; reproduce with `evals/make_paraphrases.py` +
+`retrieval_eval.py --paraphrased`.
+
 ### Verification
 
 > **Not yet recorded for the production model.** The semantic table is populated
