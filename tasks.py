@@ -205,6 +205,7 @@ def evals() -> None:
         python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
         python tasks.py evals e2e -- --model ollama/qwen3:8b
         python tasks.py evals e2e -- --validate-only                  # no LLM needed
+        python tasks.py evals corpus -- --model ollama/nomic-embed-text --limit 100  # BYO-corpus retrieval
         python tasks.py evals gate                                    # deterministic CI gate (no LLM)
         python tasks.py evals e2e -- --validate-only --gate           # same, explicit
         python tasks.py evals semantic -- --model gpt-4o-mini --gate  # keyed gate
@@ -216,6 +217,7 @@ def evals() -> None:
         "semantic": "evals/semantic_verifier_eval.py",
         "e2e": "evals/e2e_eval.py",
         "retrieval": "evals/retrieval_eval.py",
+        "corpus": "evals/corpus_eval.py",
     }
     # `gate` is the CI entry point: the two deterministic gates, no LLM keys —
     # end-to-end golden set answerability + retrieval quality (BM25 over SciFact).
@@ -226,7 +228,7 @@ def evals() -> None:
     if not args or args[0] not in scripts:
         _echo(
             "Usage: python tasks.py evals "
-            "<download|download-beir|semantic|e2e|retrieval|gate> [-- <args>]"
+            "<download|download-beir|semantic|e2e|retrieval|corpus|gate> [-- <args>]"
         )
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]

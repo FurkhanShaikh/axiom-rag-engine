@@ -76,6 +76,39 @@ SAMPLE_CHUNKS = [
 ]
 
 
+def make_pdf(text: str) -> bytes:
+    """Build a minimal single-page PDF with one text line.
+
+    Valid enough for pypdf to extract, with no PDF-writer dependency in the test
+    suite (byte offsets for the xref table are computed here).
+    """
+    esc = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    ]
+    stream = ("BT /F1 24 Tf 72 700 Td (" + esc + ") Tj ET").encode("latin-1")
+    objects.append(
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+    )
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
+    xref_pos = len(out)
+    n = len(objects) + 1
+    out += b"xref\n" + f"0 {n}\n".encode() + b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += b"trailer\n" + f"<< /Size {n} /Root 1 0 R >>\n".encode()
+    out += b"startxref\n" + str(xref_pos).encode() + b"\n%%EOF"
+    return bytes(out)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

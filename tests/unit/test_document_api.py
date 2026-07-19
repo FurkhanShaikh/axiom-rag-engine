@@ -173,6 +173,24 @@ class TestDocumentUpload:
         )
         assert resp.status_code == 201
 
+    def test_upload_pdf_file(self, corpus_client: TestClient) -> None:
+        from tests.conftest import make_pdf
+
+        pdf = make_pdf("Alpha battery specification: nominal voltage is three point seven volts.")
+        resp = corpus_client.post(
+            "/v1/documents/upload",
+            files={"file": ("spec.pdf", pdf, "application/pdf")},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["chunk_count"] >= 1
+
+    def test_upload_corrupt_pdf_returns_422(self, corpus_client: TestClient) -> None:
+        resp = corpus_client.post(
+            "/v1/documents/upload",
+            files={"file": ("broken.pdf", b"%PDF-1.4\nnot a real pdf", "application/pdf")},
+        )
+        assert resp.status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # Error paths

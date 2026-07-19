@@ -1122,6 +1122,23 @@ def _require_embedding_model() -> str:
     return model
 
 
+def _extract_text_or_422(
+    data: str | bytes,
+    *,
+    filename: str | None = None,
+    content_type: str | None = None,
+) -> str:
+    """Extract document text, mapping a format/parse failure to a clean 422.
+
+    ``extract_text`` runs before the ingest try/except, so its IngestionError
+    (e.g. a corrupt or encrypted PDF) would otherwise escape to the 500 handler.
+    """
+    try:
+        return extract_text(data, filename=filename, content_type=content_type)
+    except IngestionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 async def _ingest_and_respond(
     store: CorpusStore,
     *,
@@ -1166,7 +1183,7 @@ async def ingest_document(
     return await _ingest_and_respond(
         store,
         doc_id=doc_id,
-        text=extract_text(payload.text),
+        text=_extract_text_or_422(payload.text),
         embedding_model=model,
         title=payload.title,
         source=payload.source,
@@ -1187,7 +1204,7 @@ async def upload_document(
     store = _get_corpus_store(request)
     model = _require_embedding_model()
     data = await file.read()
-    text = extract_text(data, filename=file.filename, content_type=file.content_type)
+    text = _extract_text_or_422(data, filename=file.filename, content_type=file.content_type)
     return await _ingest_and_respond(
         store,
         doc_id=doc_id or uuid.uuid4().hex,

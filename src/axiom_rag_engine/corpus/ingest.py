@@ -2,9 +2,9 @@
 
 Text extraction is format-aware but deliberately small: plain text and markdown
 pass through as-is; HTML is run through the retriever's ``strip_html`` (the same
-boilerplate removal used for web results). PDF is a scoped follow-up — it needs a
-parser dependency, so it lives behind an explicit extractor rather than being
-smuggled in here.
+boilerplate removal used for web results); PDF is parsed with ``pypdf``. PDF is
+the only format needing a heavy parser, so its import is lazy — it costs nothing
+until a PDF is actually ingested.
 
 Chunking and embedding reuse the production pipeline verbatim: the same
 ``chunk_into_paragraphs`` the web retriever uses, and the same LiteLLM embedder
@@ -15,6 +15,7 @@ one standard.
 
 from __future__ import annotations
 
+import io
 import re
 from collections.abc import Awaitable, Callable
 
@@ -33,6 +34,15 @@ class IngestionError(Exception):
 
 _HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
 _HTML_DOC_SIGNATURE = re.compile(r"<\s*html[\s>]|<!doctype\s+html", re.IGNORECASE)
+_PDF_MAGIC = b"%PDF-"
+
+
+def _looks_like_pdf(data: str | bytes, filename: str | None, content_type: str | None) -> bool:
+    if isinstance(data, bytes) and data[:5] == _PDF_MAGIC:
+        return True
+    if filename and filename.lower().endswith(".pdf"):
+        return True
+    return bool(content_type and "pdf" in content_type.lower())
 
 
 def _looks_like_html(text: str, filename: str | None, content_type: str | None) -> bool:
@@ -43,6 +53,24 @@ def _looks_like_html(text: str, filename: str | None, content_type: str | None) 
     return bool(_HTML_DOC_SIGNATURE.search(text[:1000]))
 
 
+def _extract_pdf(data: bytes) -> str:
+    """Extract text from a PDF's pages, joined by blank lines.
+
+    ``pypdf`` is imported lazily so it is a cost only for PDF ingestion. A
+    corrupt or encrypted PDF raises :class:`IngestionError` rather than a raw
+    parser error, so the API can turn it into a clean 422.
+    """
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+    except (PdfReadError, ValueError, OSError) as exc:
+        raise IngestionError(f"could not read PDF: {exc}") from exc
+    return "\n\n".join(p for p in pages if p)
+
+
 def extract_text(
     data: str | bytes,
     *,
@@ -51,11 +79,20 @@ def extract_text(
 ) -> str:
     """Turn raw document bytes/str into clean text ready for chunking.
 
-    Bytes are decoded as UTF-8 with replacement (a corpus should never fail to
-    ingest over one bad byte). HTML — detected by extension, content type, or a
-    document signature — is boilerplate-stripped; everything else (txt, md, rst)
-    is treated as plain text.
+    Format is resolved before decoding, so binary formats are never UTF-8
+    mangled: PDF (magic bytes / ``.pdf`` / content type) is parsed with pypdf;
+    HTML (signature / ``.htm*`` / content type) is boilerplate-stripped;
+    everything else (txt, md, rst) is treated as UTF-8 plain text (decoded with
+    replacement so one bad byte never fails an ingest).
+
+    Raises:
+        IngestionError: a PDF was detected but the input is text, or unreadable.
     """
+    if _looks_like_pdf(data, filename, content_type):
+        if not isinstance(data, bytes):
+            raise IngestionError("PDF input must be raw bytes, not text.")
+        return _extract_pdf(data)
+
     text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
     if _looks_like_html(text, filename, content_type):
         return strip_html(text)

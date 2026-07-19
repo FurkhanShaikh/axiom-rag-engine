@@ -20,6 +20,7 @@ from axiom_rag_engine.corpus.store import (
     _pack_embedding,
     _unpack_embedding,
 )
+from tests.conftest import make_pdf
 
 # ---------------------------------------------------------------------------
 # Deterministic fake embedder
@@ -254,6 +255,31 @@ class TestExtractText:
         frag = "<div>Content typed as html.</div>"
         out = extract_text(frag, content_type="text/html; charset=utf-8")
         assert out == "Content typed as html."
+
+
+# ---------------------------------------------------------------------------
+# Ingestion: PDF extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPdf:
+    def test_extracts_text_by_magic_bytes(self) -> None:
+        pdf = make_pdf("Alpha corpus fact extracted from a PDF page")
+        out = extract_text(pdf)  # detected by %PDF- magic, no filename needed
+        assert "Alpha corpus fact" in out
+
+    def test_extracts_by_filename_and_content_type(self) -> None:
+        pdf = make_pdf("Beta document body")
+        assert "Beta document body" in extract_text(pdf, filename="report.pdf")
+        assert "Beta document body" in extract_text(pdf, content_type="application/pdf")
+
+    def test_pdf_as_str_is_rejected(self) -> None:
+        with pytest.raises(IngestionError, match="raw bytes"):
+            extract_text("not really a pdf", filename="fake.pdf")
+
+    def test_corrupt_pdf_raises_ingestion_error(self) -> None:
+        with pytest.raises(IngestionError, match="could not read PDF"):
+            extract_text(b"%PDF-1.4\nthis is not a valid pdf body at all")
 
 
 # ---------------------------------------------------------------------------

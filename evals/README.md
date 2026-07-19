@@ -12,6 +12,7 @@ normalization, ranking, or tier logic.
 | 1 | `semantic_verifier_eval.py` | [SciFact](https://github.com/allenai/scifact) (dev split) | Semantic verifier accuracy: does it pass SUPPORTed claims and fail CONTRADICTed ones? |
 | 2 | `e2e_eval.py` | `golden/seed.jsonl` (committed, hand-curated) | Full pipeline behavior: answerability, tier assignment, Tier-5 leakage, non-Latin support |
 | 3 | `retrieval_eval.py` | SciFact (dev split) | Retrieval quality: does the ranker surface the gold evidence document near the top? (recall@k, nDCG@10, MRR) |
+| 4 | `corpus_eval.py` | SciFact / BEIR | Bring-your-own-corpus retrieval: ingests a dataset through the **production** `ingest_text` + `CorpusStore.search` and scores document-level recall@k / nDCG / MRR. Exercises the shipped ingest→store→search path (chunking + SQLite round trip), not a lookalike. Needs a live embedding model. |
 
 ### Why SciFact for Layer 3
 
@@ -74,6 +75,12 @@ python tasks.py evals retrieval -- --limit 0       # BM25, all 188 labeled claim
 # so the first dense/hybrid run takes ~5 min and later runs are instant.
 python tasks.py evals retrieval -- --method dense  --limit 0
 python tasks.py evals retrieval -- --method hybrid --limit 0
+
+# Layer 4 — bring-your-own-corpus retrieval (production ingest → store → search)
+# Ingests the dataset through the real corpus pipeline, then scores doc-level
+# recall. Needs a live embedding model (LiteLLM); not cached, so ingestion re-embeds.
+python tasks.py evals corpus -- --model ollama/nomic-embed-text --limit 100
+python tasks.py evals corpus -- --dataset arguana --model text-embedding-3-small
 ```
 
 **Retrieval methods.** `bm25` is the production ranker (deterministic, no keys,
