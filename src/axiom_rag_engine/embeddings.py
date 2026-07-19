@@ -72,3 +72,31 @@ async def embed_query_and_chunks(
     # LiteLLM normalizes the response to OpenAI shape: data[i]["embedding"].
     vectors = [_l2_normalize(list(row["embedding"])) for row in response["data"]]
     return vectors[0], vectors[1:]
+
+
+async def embed_documents(model: str, texts: list[str]) -> list[list[float]]:
+    """Embed passage/document texts with the doc-side task prefix, L2-normalized.
+
+    Used by corpus ingestion to compute stored chunk vectors. Returns one vector
+    per input, aligned with ``texts`` (empty input → empty list). Because rows
+    are L2-normalized, later cosine scoring against a query vector is a plain
+    dot product — the same convention the ranker uses.
+    """
+    if not texts:
+        return []
+    doc_prefix, _ = embed_prefixes(model)
+    inputs = [doc_prefix + t for t in texts]
+    response = await litellm.aembedding(**_embedding_kwargs(model, inputs))
+    return [_l2_normalize(list(row["embedding"])) for row in response["data"]]
+
+
+async def embed_query(model: str, query: str) -> list[float]:
+    """Embed a single query string with the query-side task prefix, L2-normalized.
+
+    The corpus-retrieval counterpart to :func:`embed_documents`: the query
+    vector it returns is cosine-comparable to stored chunk vectors *only when
+    both were produced by the same model*, which the corpus store enforces.
+    """
+    _, query_prefix = embed_prefixes(model)
+    response = await litellm.aembedding(**_embedding_kwargs(model, [query_prefix + query]))
+    return _l2_normalize(list(response["data"][0]["embedding"]))

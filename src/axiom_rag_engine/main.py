@@ -25,15 +25,19 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import (  # noqa: F401 — HTTPException re-exported for test compat
+from fastapi import (
     Depends,
     FastAPI,
+    File,
+    Form,
     HTTPException,
     Request,
+    UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -63,9 +67,17 @@ from axiom_rag_engine.config.observability import (
     setup_tracing,
 )
 from axiom_rag_engine.config.settings import Settings, get_settings
+from axiom_rag_engine.corpus.ingest import IngestionError, extract_text, ingest_text
+from axiom_rag_engine.corpus.store import CorpusStore, DocumentMeta
 from axiom_rag_engine.graph import build_axiom_graph
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
-from axiom_rag_engine.models import AxiomRequest, AxiomResponse
+from axiom_rag_engine.models import (
+    AxiomRequest,
+    AxiomResponse,
+    DocumentIngestRequest,
+    DocumentListResponse,
+    DocumentResponse,
+)
 from axiom_rag_engine.nodes.retriever import set_search_backend
 from axiom_rag_engine.scoring import (  # noqa: F401 — re-exported
     compute_confidence_summary,
@@ -244,6 +256,119 @@ def _resolve_llm_defaults(
 
 def _allow_mock_search() -> bool:
     return get_settings().allow_mock_search
+
+
+def _build_corpus_store(settings: Settings) -> Any:
+    """Open the corpus store when AXIOM_CORPUS_DB_PATH is set, else return None.
+
+    Presence of the store is what enables the document-management API — separate
+    from whether corpus results are wired into retrieval (AXIOM_RETRIEVAL_SOURCE).
+    """
+    if not settings.corpus_db_path:
+        return None
+    from axiom_rag_engine.corpus.store import CorpusStore
+
+    store = CorpusStore(settings.corpus_db_path)
+    logger.info(
+        "Corpus store open at %s (%d documents, %d chunks).",
+        settings.corpus_db_path,
+        store.count_documents(),
+        store.count_chunks(),
+    )
+    return store
+
+
+def _wire_search_backends(app: FastAPI, settings: Settings) -> None:
+    """Install the retriever's search backend(s) per AXIOM_RETRIEVAL_SOURCE.
+
+    'web' → Tavily (or mock in dev); 'corpus' → ingested documents only;
+    'both' → web + corpus merged (the retriever deduplicates the union). Corpus
+    modes require a corpus store and an embedding model. When 'both' is requested
+    but Tavily is unavailable, it degrades to corpus-only rather than failing.
+    """
+    source = settings.retrieval_source
+    want_web = source in ("web", "both")
+    want_corpus = source in ("corpus", "both")
+
+    backends: list[Any] = []
+    modes: list[str] = []
+
+    # --- Web (Tavily) ---
+    if want_web:
+        # TAVILY_API_KEY is read directly (not via Settings) because it lacks the
+        # AXIOM_ prefix — it's a vendor credential, not an app setting.
+        tavily_key = settings.tavily_api_key
+        if tavily_key:
+            from axiom_rag_engine.search.tavily import TavilySearchBackend
+
+            backends.append(
+                TavilySearchBackend(
+                    api_key=tavily_key,
+                    fetch_full_pages=settings.fetch_full_pages,
+                    max_raw_content_chars=settings.max_raw_content_chars,
+                )
+            )
+            modes.append("tavily")
+            if settings.fetch_full_pages:
+                logger.info("Web search: Tavily (verifying against full page text).")
+            else:
+                logger.warning(
+                    "Web search: Tavily with AXIOM_FETCH_FULL_PAGES=false — citations are "
+                    "verified against search snippets, not the source page. Quotes that exist "
+                    "on the page but not in the snippet will be marked Tier 5 (hallucinated)."
+                )
+        elif want_corpus:
+            logger.warning(
+                "AXIOM_RETRIEVAL_SOURCE=both but TAVILY_API_KEY is not set — "
+                "serving corpus results only."
+            )
+        elif _auth_required() and not _allow_mock_search():
+            raise RuntimeError(
+                "TAVILY_API_KEY must be configured in non-development environments unless "
+                "AXIOM_ALLOW_MOCK_SEARCH=true."
+            )
+        else:
+            logger.warning(
+                "TAVILY_API_KEY not set — using MockSearchBackend. "
+                "Set TAVILY_API_KEY in .env for live web search."
+            )
+            modes.append("mock")
+
+    # --- Corpus (ingested documents) ---
+    if want_corpus:
+        if app.state.corpus_store is None:
+            raise RuntimeError(f"AXIOM_RETRIEVAL_SOURCE={source!r} requires AXIOM_CORPUS_DB_PATH.")
+        if not settings.embedding_model:
+            raise RuntimeError(
+                "Corpus retrieval requires AXIOM_EMBEDDING_MODEL — chunks are embedded at "
+                "ingest and matched by cosine at query time."
+            )
+        from axiom_rag_engine.search.corpus_backend import CorpusSearchBackend
+
+        backends.append(
+            CorpusSearchBackend(
+                app.state.corpus_store,
+                settings.embedding_model,
+                max_results=settings.corpus_max_results,
+            )
+        )
+        modes.append("corpus")
+        logger.info(
+            "Corpus retrieval enabled (embedding model %s, top-%d per query).",
+            settings.embedding_model,
+            settings.corpus_max_results,
+        )
+
+    # --- Install ---
+    if len(backends) == 1:
+        set_search_backend(backends[0])
+    elif len(backends) > 1:
+        from axiom_rag_engine.search.corpus_backend import CompositeSearchBackend
+
+        set_search_backend(CompositeSearchBackend(backends))
+    # No configured backends (dev, no key) → retriever keeps its default mock.
+
+    app.state.search_backend_mode = "+".join(modes) if modes else "mock"
 
 
 def _semantic_verification_enabled() -> bool:
@@ -469,42 +594,12 @@ async def lifespan(app: FastAPI):
     app.state.default_synthesizer_model = synth_model
     app.state.default_verifier_model = verif_model
 
-    # Wire search backend — Tavily if key present, else MockSearchBackend.
-    # TAVILY_API_KEY is read directly (not via Settings) because it lacks the
-    # AXIOM_ prefix — it's a vendor credential, not an app setting.
-    tavily_key = settings.tavily_api_key
-    if tavily_key:
-        from axiom_rag_engine.search.tavily import TavilySearchBackend
-
-        set_search_backend(
-            TavilySearchBackend(
-                api_key=tavily_key,
-                fetch_full_pages=settings.fetch_full_pages,
-                max_raw_content_chars=settings.max_raw_content_chars,
-            )
-        )
-        app.state.search_backend_mode = "tavily"
-        if settings.fetch_full_pages:
-            logger.info(
-                "Search backend: Tavily (live web search, verifying against full page text)."
-            )
-        else:
-            logger.warning(
-                "Search backend: Tavily with AXIOM_FETCH_FULL_PAGES=false — citations are "
-                "verified against search snippets, not the source page. Quotes that exist "
-                "on the page but not in the snippet will be marked Tier 5 (hallucinated)."
-            )
-    elif _auth_required() and not _allow_mock_search():
-        raise RuntimeError(
-            "TAVILY_API_KEY must be configured in non-development environments unless "
-            "AXIOM_ALLOW_MOCK_SEARCH=true."
-        )
-    else:
-        app.state.search_backend_mode = "mock"
-        logger.warning(
-            "TAVILY_API_KEY not set — using MockSearchBackend. "
-            "Set TAVILY_API_KEY in .env for live web search."
-        )
+    # Wire the search backend(s) from AXIOM_RETRIEVAL_SOURCE (web | corpus | both).
+    # The corpus store is created whenever AXIOM_CORPUS_DB_PATH is set — that
+    # enables the document-management API independently of whether corpus results
+    # are wired into retrieval (you can ingest under 'web', then switch to 'both').
+    app.state.corpus_store = _build_corpus_store(settings)
+    _wire_search_backends(app, settings)
 
     setup_tracing(app, "axiom-rag-engine", _VERSION)
 
@@ -563,18 +658,33 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # ty
 # legitimate AxiomRequest (user_query is capped at 10k chars + small configs)
 # and small enough to stop trivial OOM / slow-parse DoS with oversized bodies.
 _MAX_BODY_BYTES = _startup_settings.max_body_bytes
+# Document ingestion carries whole documents, so it gets its own, larger cap.
+_MAX_DOCUMENT_BYTES = _startup_settings.max_document_bytes
+
+
+def _body_limit_for(path: str) -> int:
+    """The body-size cap that applies to ``path``.
+
+    The document-management endpoints accept whole documents and use the larger
+    ``AXIOM_MAX_DOCUMENT_BYTES`` cap; everything else uses the tight default that
+    protects the synthesize API from oversized-body DoS.
+    """
+    if path.startswith("/v1/documents"):
+        return _MAX_DOCUMENT_BYTES
+    return _MAX_BODY_BYTES
 
 
 @app.middleware("http")
 async def _enforce_body_size(request: Request, call_next):
     if request.method in ("POST", "PUT", "PATCH"):
+        cap = _body_limit_for(request.url.path)
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
-                if int(declared) > _MAX_BODY_BYTES:
+                if int(declared) > cap:
                     return JSONResponse(
                         status_code=413,
-                        content={"detail": f"Request body exceeds {_MAX_BODY_BYTES} bytes."},
+                        content={"detail": f"Request body exceeds {cap} bytes."},
                     )
             except ValueError:
                 return JSONResponse(
@@ -588,10 +698,10 @@ async def _enforce_body_size(request: Request, call_next):
             total = 0
             async for chunk in request.stream():
                 total += len(chunk)
-                if total > _MAX_BODY_BYTES:
+                if total > cap:
                     return JSONResponse(
                         status_code=413,
-                        content={"detail": f"Request body exceeds {_MAX_BODY_BYTES} bytes."},
+                        content={"detail": f"Request body exceeds {cap} bytes."},
                     )
                 chunks.append(chunk)
             # Cache the buffered body so downstream handlers can still read it.
@@ -972,6 +1082,171 @@ async def get_audit(
 
 
 # ---------------------------------------------------------------------------
+# Corpus / document management
+# ---------------------------------------------------------------------------
+
+_CORPUS_DISABLED_DETAIL = (
+    "Corpus is not enabled. Set AXIOM_CORPUS_DB_PATH to enable document ingestion."
+)
+_EMBEDDING_REQUIRED_DETAIL = (
+    "Document ingestion requires AXIOM_EMBEDDING_MODEL — chunks are embedded at "
+    "ingest and matched by cosine at query time."
+)
+
+
+def _meta_to_response(meta: DocumentMeta) -> DocumentResponse:
+    return DocumentResponse(
+        doc_id=meta.doc_id,
+        title=meta.title,
+        source=meta.source,
+        embedding_model=meta.embedding_model,
+        content_sha=meta.content_sha,
+        chunk_count=meta.chunk_count,
+        char_count=meta.char_count,
+        created_at=meta.created_at,
+    )
+
+
+def _get_corpus_store(request: Request) -> CorpusStore:
+    """Return the corpus store or raise 404 when ingestion is not enabled."""
+    store: CorpusStore | None = getattr(request.app.state, "corpus_store", None)
+    if store is None:
+        raise HTTPException(status_code=404, detail=_CORPUS_DISABLED_DETAIL)
+    return store
+
+
+def _require_embedding_model() -> str:
+    model = get_settings().embedding_model
+    if not model:
+        raise HTTPException(status_code=409, detail=_EMBEDDING_REQUIRED_DETAIL)
+    return model
+
+
+async def _ingest_and_respond(
+    store: CorpusStore,
+    *,
+    doc_id: str,
+    text: str,
+    embedding_model: str,
+    title: str,
+    source: str,
+) -> Response:
+    """Shared ingest path for the JSON and file-upload endpoints."""
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="Document produced no text to ingest.")
+    try:
+        meta = await ingest_text(
+            store,
+            doc_id=doc_id,
+            text=text,
+            embedding_model=embedding_model,
+            title=title,
+            source=source,
+            max_chunks=get_settings().corpus_max_chunks_per_document,
+        )
+    except IngestionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # embedding backend failure, etc.
+        logger.exception("Document ingestion failed for %s", doc_id)
+        raise HTTPException(status_code=502, detail=f"Ingestion backend error: {exc}") from exc
+    return JSONResponse(status_code=201, content=_meta_to_response(meta).model_dump())
+
+
+@app.post("/v1/documents", summary="Ingest a document into the corpus from raw text.")
+async def ingest_document(
+    payload: DocumentIngestRequest,
+    request: Request,
+    _api_key: str | None = Depends(verify_api_key),
+) -> Response:
+    """Chunk, embed, and store a document. Re-ingesting an existing ``doc_id``
+    replaces it. Returns the stored document's metadata (201)."""
+    store = _get_corpus_store(request)
+    model = _require_embedding_model()
+    doc_id = payload.doc_id or uuid.uuid4().hex
+    return await _ingest_and_respond(
+        store,
+        doc_id=doc_id,
+        text=extract_text(payload.text),
+        embedding_model=model,
+        title=payload.title,
+        source=payload.source,
+    )
+
+
+@app.post("/v1/documents/upload", summary="Ingest a document from an uploaded file.")
+async def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    source: str = Form(""),
+    doc_id: str | None = Form(None),
+    _api_key: str | None = Depends(verify_api_key),
+) -> Response:
+    """Ingest an uploaded file (text / markdown / HTML). The filename becomes the
+    default ``source`` and content type guides HTML extraction."""
+    store = _get_corpus_store(request)
+    model = _require_embedding_model()
+    data = await file.read()
+    text = extract_text(data, filename=file.filename, content_type=file.content_type)
+    return await _ingest_and_respond(
+        store,
+        doc_id=doc_id or uuid.uuid4().hex,
+        text=text,
+        embedding_model=model,
+        title=title or (file.filename or ""),
+        source=source or (file.filename or ""),
+    )
+
+
+@app.get(
+    "/v1/documents",
+    summary="List ingested documents.",
+    response_model=DocumentListResponse,
+)
+async def list_documents(
+    request: Request,
+    _api_key: str | None = Depends(verify_api_key),
+) -> DocumentListResponse:
+    store = _get_corpus_store(request)
+    stats = store.stats()
+    return DocumentListResponse(
+        documents=[_meta_to_response(m) for m in store.list_documents()],
+        total_documents=stats.documents,
+        total_chunks=stats.chunks,
+        embedding_models=stats.embedding_models,
+    )
+
+
+@app.get(
+    "/v1/documents/{doc_id}",
+    summary="Fetch one ingested document's metadata.",
+    response_model=DocumentResponse,
+)
+async def get_document(
+    doc_id: str,
+    request: Request,
+    _api_key: str | None = Depends(verify_api_key),
+) -> DocumentResponse:
+    store = _get_corpus_store(request)
+    meta = store.get_document(doc_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
+    return _meta_to_response(meta)
+
+
+@app.delete("/v1/documents/{doc_id}", summary="Delete an ingested document.")
+async def delete_document(
+    doc_id: str,
+    request: Request,
+    _api_key: str | None = Depends(verify_api_key),
+) -> Response:
+    store = _get_corpus_store(request)
+    if not store.delete_document(doc_id):
+        raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
+    return JSONResponse(content={"deleted": True, "doc_id": doc_id})
+
+
+# ---------------------------------------------------------------------------
 # Operator status snapshot
 # ---------------------------------------------------------------------------
 
@@ -1030,6 +1305,12 @@ async def get_status(request: Request) -> dict[str, Any]:
             "ranking_mode": "hybrid" if settings.embedding_model else "bm25",
             "embedding_model": settings.embedding_model,
             "rrf_k": settings.rrf_k,
+            "source": settings.retrieval_source,
+            "corpus": (
+                state.corpus_store.stats().as_dict()
+                if getattr(state, "corpus_store", None) is not None
+                else None
+            ),
         },
         "observability": {
             "log_format": settings.log_format,

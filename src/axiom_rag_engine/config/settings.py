@@ -208,6 +208,45 @@ class Settings(BaseSettings):
         description="Reciprocal-rank-fusion constant for hybrid retrieval. 60 is the RRF-paper default.",
     )
 
+    # ── Corpus (bring-your-own documents) ────────────────────────────────
+    corpus_db_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to the SQLite corpus database for ingested documents. Set it to "
+            "enable the document-management API and corpus retrieval. Unset "
+            "(default) = web-only, no corpus. Requires AXIOM_EMBEDDING_MODEL, since "
+            "ingestion and corpus search are dense (chunks are embedded at ingest "
+            "and matched by cosine at query time)."
+        ),
+    )
+    retrieval_source: Literal["web", "corpus", "both"] = Field(
+        default="web",
+        description=(
+            "Where the retriever draws sources from: 'web' (Tavily, default), "
+            "'corpus' (only ingested documents), or 'both' (merge web + corpus, "
+            "deduplicated). 'corpus'/'both' require AXIOM_CORPUS_DB_PATH."
+        ),
+    )
+    corpus_max_results: int = Field(
+        default=5,
+        ge=1,
+        description="Top-k chunks corpus retrieval returns per search query.",
+    )
+    corpus_max_chunks_per_document: int = Field(
+        default=2000,
+        ge=1,
+        description="Cap on chunks stored per ingested document (guards a runaway upload).",
+    )
+    max_document_bytes: int = Field(
+        default=10_485_760,  # 10 MiB
+        ge=1,
+        description=(
+            "Body-size cap for the document-ingest endpoints, separate from "
+            "AXIOM_MAX_BODY_BYTES (which stays small for the synthesize API). "
+            "Documents are legitimately large, so this is higher by default."
+        ),
+    )
+
     # ── Verification ─────────────────────────────────────────────────────
     semantic_verification_enabled: bool = Field(
         default=True,

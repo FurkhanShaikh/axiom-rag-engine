@@ -51,6 +51,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.48b0",
     "langchain-core>=1.2.28",
     "starlette>=1.0.1",  # security floor; also requires instrumentator>=8 (7.x caps starlette<1)
+    "python-multipart>=0.0.32",
 ]
 
 [project.optional-dependencies]
@@ -113,6 +114,11 @@ ignore = ["E501", "RUF001", "RUF002"]  # E501: handled by ruff format; RUF001/2:
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "T20"]  # S101: assert is expected in pytest; T20: allow print()
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are the idiomatic way to declare
+# request parameters; calling them in argument defaults is intended, not a B008.
+extend-immutable-calls = ["fastapi.File", "fastapi.Form"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["axiom_rag_engine"]

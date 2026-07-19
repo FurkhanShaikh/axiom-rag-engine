@@ -172,6 +172,52 @@ and `ranker_complete` reports `ranking_mode` (`bm25` or `hybrid`).
 call over the query plus its retrieved chunks. A hosted embedder adds ~100–300 ms;
 a local Ollama model is slower but free.
 
+## Document ingestion (bring-your-own corpus)
+
+Axiom can answer over **your own documents**, not just the live web. Ingested
+documents flow through the identical chunk → score → rank → verify pipeline, so a
+corpus answer carries the same verbatim-quote citations and confidence tiers as a
+web answer.
+
+Enable it by pointing `AXIOM_CORPUS_DB_PATH` at a SQLite file and choosing where
+the retriever draws from with `AXIOM_RETRIEVAL_SOURCE`:
+
+```bash
+export AXIOM_CORPUS_DB_PATH=./data/corpus.db
+export AXIOM_EMBEDDING_MODEL=ollama/nomic-embed-text  # corpus retrieval is dense
+export AXIOM_RETRIEVAL_SOURCE=both                    # web | corpus | both
+```
+
+Manage the corpus over HTTP:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/documents` | Ingest a document from raw text (JSON body). |
+| `POST` | `/v1/documents/upload` | Ingest an uploaded file (text / markdown / HTML). |
+| `GET` | `/v1/documents` | List ingested documents + corpus totals. |
+| `GET` | `/v1/documents/{id}` | Fetch one document's metadata. |
+| `DELETE` | `/v1/documents/{id}` | Remove a document and its chunks. |
+
+```bash
+# Ingest raw text
+curl -X POST localhost:8000/v1/documents -H 'content-type: application/json' \
+  -d '{"text": "Our refund policy allows returns within 30 days...", "title": "Refund Policy"}'
+
+# Ingest a file
+curl -X POST localhost:8000/v1/documents/upload -F file=@handbook.md
+```
+
+**Design notes.**
+- **Dense retrieval.** Chunks are embedded at ingest and matched by cosine at
+  query time, so `corpus`/`both` require `AXIOM_EMBEDDING_MODEL`. Cosine is only
+  compared between vectors from the *same* model — documents embedded under a
+  different model become searchable again only after re-ingest.
+- **Idempotent.** Re-ingesting the same `doc_id` replaces the document wholesale.
+- **Dependency-light.** Single-node SQLite with brute-force cosine — no vector-DB
+  server, no numpy. `GET /v1/status` reports corpus size under `retrieval.corpus`.
+- **`both` degrades gracefully.** If web search is requested but `TAVILY_API_KEY`
+  is absent, it serves corpus results rather than failing.
+
 ## Verification sources
 
 A citation is only as verified as the text it was checked against.

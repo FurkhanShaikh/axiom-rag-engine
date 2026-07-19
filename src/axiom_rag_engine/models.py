@@ -372,3 +372,51 @@ class AxiomResponse(BaseModel):
         default=None,
         description="LLM token counts and best-effort USD cost for this request.",
     )
+
+
+# ---------------------------------------------------------------------------
+# CORPUS / DOCUMENT MANAGEMENT
+# ---------------------------------------------------------------------------
+
+
+class DocumentIngestRequest(BaseModel):
+    """Body for ``POST /v1/documents`` — ingest one document from raw text."""
+
+    text: str = Field(
+        min_length=1,
+        max_length=5_000_000,
+        description="Document body. HTML is boilerplate-stripped; text/markdown ingested as-is.",
+    )
+    title: str = Field(default="", max_length=500)
+    source: str = Field(
+        default="",
+        max_length=2000,
+        description="Provenance label (a URL, filename, or system id). Shown with citations.",
+    )
+    doc_id: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Stable id. Re-ingesting the same id replaces the document. Auto-generated if omitted.",
+    )
+
+
+class DocumentResponse(BaseModel):
+    """Metadata for one ingested document (mirrors the store's DocumentMeta)."""
+
+    doc_id: str
+    title: str
+    source: str
+    embedding_model: str
+    content_sha: str
+    chunk_count: int
+    char_count: int
+    created_at: str
+
+
+class DocumentListResponse(BaseModel):
+    """Body for ``GET /v1/documents`` — the corpus contents and totals."""
+
+    documents: list[DocumentResponse] = Field(default_factory=list)
+    total_documents: int = 0
+    total_chunks: int = 0
+    embedding_models: list[str] = Field(default_factory=list)
