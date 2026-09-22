@@ -141,7 +141,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=_cors_origins(config),
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],  # DELETE: /v1/documents/{id}
         allow_headers=["X-API-Key", "Content-Type"],
     )
 

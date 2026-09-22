@@ -345,7 +345,8 @@ ceiling) once you want the full keyed run gated nightly.
   (Arabic, accented Latin, …) and splits CJK/Thai runs into character bigrams —
   the standard dictionary-free approach, but weaker than a real segmenter. It
   did not change the SciFact numbers above (English).
-- **Tier calibration is not yet measured.** Whether Tier 1 correlates with
-  actual answer correctness needs labeled answer correctness, which the current
-  seed set is too small to provide. That arrives with a larger pinned-corpus
-  dataset (ALCE/ASQA).
+- **Tier calibration is not yet measured.** The harness exists
+  (`evals/calibration_eval.py`: ASQA gold answers at answer level, a separate
+  judge model at sentence level), but no full run has completed. An interrupted
+  run (28/100 questions, local qwen3.5:9b) assigned only Tier 3, so ASQA may not
+  exercise Tiers 1/2 at all.

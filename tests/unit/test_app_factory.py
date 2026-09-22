@@ -187,3 +187,22 @@ class TestPerAppLimits:
             _post(b, "third")  # app B has its own (empty) cache
         assert calls_after_a == 1
         assert mock_llm.call_count == 2
+
+
+class TestCors:
+    def test_browser_clients_may_delete_documents(self) -> None:
+        app = create_app(
+            _settings(cors_origins=["https://ui.example.com"]),
+            search_backend=MockSearchBackend([]),
+        )
+        with TestClient(app) as client:
+            resp = client.options(
+                "/v1/documents/some-doc",
+                headers={
+                    "Origin": "https://ui.example.com",
+                    "Access-Control-Request-Method": "DELETE",
+                    "Access-Control-Request-Headers": "X-API-Key",
+                },
+            )
+        assert resp.status_code == 200
+        assert "DELETE" in resp.headers["access-control-allow-methods"]

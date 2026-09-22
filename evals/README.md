@@ -14,6 +14,7 @@ normalization, ranking, or tier logic.
 | 3 | `retrieval_eval.py` | SciFact (dev split) | Retrieval quality: does the ranker surface the gold evidence document near the top? (recall@k, nDCG@10, MRR) |
 | 4 | `corpus_eval.py` | SciFact / BEIR | Bring-your-own-corpus retrieval: ingests a dataset through the **production** `ingest_text` + `CorpusStore.search` and scores document-level recall@k / nDCG / MRR. Exercises the shipped ingest→store→search path (chunking + SQLite round trip), not a lookalike. Needs a live embedding model. |
 | 5 | `query_expansion_eval.py` | Golden-set questions × live Tavily (cached) | Whether the retriever's extra searches earn their cost: compares original-only, the production reformulations, and an LLM keyword rewrite through the production retriever → scorer → ranker, graded 0-3 by an LLM judge (pooled top-k). Reports grade@k, nDCG@k, precision@k, domain diversity, and searches per question. Search results are cached, so reruns spend no credits. |
+| 6 | `calibration_eval.py` | ASQA dev (948 ambiguous questions with gold short answers) × live Tavily (cached) | **Tier calibration**: runs the full pipeline, has a *different* judge model grade every sentence against the full text of its cited passages, and reports the judged-supported rate per tier (95% Wilson CI) next to the tier's confidence weight. Answer level, non-circular: STR-EM against ASQA gold answers vs `overall_score` / status. Phases `run` / `judge` / `report` are resumable; re-judge cached runs with a stronger model at no pipeline cost. |
 
 ### Why SciFact for Layer 3
 
@@ -178,9 +179,11 @@ will score lower on Layer 1 than cloud models — compare like against like.
 
 ## Known measurement gaps
 
-- The ranker tokenizes `[a-z0-9]+` only, so BM25 relevance is 0 for
-  non-Latin queries — such cases rank on quality score alone. The Arabic
-  golden case exercises this path deliberately.
-- Tier calibration (does Tier 1 correlate with actual correctness?) needs
-  labeled answer correctness, which the seed set is too small to provide.
-  That arrives with ALCE/ASQA integration.
+- CJK lexical matching uses character bigrams (no word segmenter), so BM25
+  relevance for Chinese/Japanese queries is approximate. The Arabic and CJK
+  golden cases exercise the non-Latin path.
+- Tier calibration: the harness exists (`calibration_eval.py`, ASQA) but no
+  full run has completed yet. A partial run (28/100 questions, local
+  qwen3.5:9b) produced only Tier 3 sentences — trivia questions rarely
+  surface primary sources or multi-domain citations — so Tier 1/2 may stay
+  uncalibrated on ASQA.
