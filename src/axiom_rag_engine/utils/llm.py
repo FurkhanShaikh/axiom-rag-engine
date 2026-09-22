@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import functools
 import json
 import re
 import time
@@ -226,21 +227,39 @@ def get_llm_semaphore() -> asyncio.Semaphore:
     return _llm_semaphore
 
 
+# (schema name, JSON Schema) for structured output.
+JsonSchemaSpec = tuple[str, dict[str, Any]]
+
+
+@functools.lru_cache(maxsize=256)
+def _supports_response_schema(model: str) -> bool:
+    """Whether LiteLLM can send a JSON Schema to ``model``'s provider."""
+    try:
+        import litellm
+
+        return bool(litellm.supports_response_schema(model=model))
+    except Exception:
+        return False
+
+
 def build_completion_kwargs(
     model: str,
     messages: list[dict[str, Any]],
     temperature: float = 0.0,
     timeout: int = _DEFAULT_TIMEOUT,
     json_mode: bool = True,
+    json_schema: JsonSchemaSpec | None = None,
 ) -> dict[str, Any]:
     """
     Build a kwargs dict for litellm.acompletion(), handling provider quirks.
 
-    - Ollama models: injects api_base from OLLAMA_API_BASE env var (defaults
-      to http://localhost:11434). response_format is NOT set because Ollama
-      returns empty content when it is.
-    - All other providers: sets response_format={"type": "json_object"} when
-      json_mode=True (OpenAI-compatible structured output).
+    - Ollama models: injects api_base from OLLAMA_API_BASE (defaults to
+      http://localhost:11434). response_format is NOT set because Ollama returns
+      empty content with it; instead Ollama's native ``format`` carries the JSON
+      Schema (``json_schema``) or plain ``"json"`` (``json_mode``).
+    - Other providers: with ``json_schema``, a ``json_schema`` response_format when
+      LiteLLM reports the model supports it; otherwise (or with only
+      ``json_mode``) ``{"type": "json_object"}``.
     - Always sets timeout to prevent indefinite hangs.
     """
     kwargs: dict[str, Any] = {
@@ -257,11 +276,19 @@ def build_completion_kwargs(
         # Other models reject it, so only set it for qwen3/* variants.
         if "qwen3" in model.lower():
             extra["think"] = False
-        if json_mode:
+        if json_schema is not None:
+            extra["format"] = json_schema[1]
+        elif json_mode:
             extra["format"] = "json"
         if extra:
             kwargs["extra_body"] = extra
-    elif json_mode:
+    elif json_schema is not None and _supports_response_schema(model):
+        name, schema = json_schema
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": schema},
+        }
+    elif json_mode or json_schema is not None:
         kwargs["response_format"] = {"type": "json_object"}
 
     return kwargs
@@ -279,6 +306,7 @@ async def call_llm(
     *,
     temperature: float = 0.0,
     json_mode: bool = True,
+    json_schema: JsonSchemaSpec | None = None,
     max_tokens: int | None = None,
 ) -> str:
     """Issue one chat completion under the shared call policy; return its text.
@@ -289,7 +317,8 @@ async def call_llm(
         to degrade or abort, and the endpoint maps it to HTTP 429);
       - the global concurrency semaphore bounds in-flight calls;
       - duration, tokens, and cost are recorded under ``node``;
-      - provider quirks come from :func:`build_completion_kwargs`.
+      - provider quirks come from :func:`build_completion_kwargs`; pass
+        ``json_schema`` to request schema-conforming output where supported.
 
     Provider errors propagate unchanged. ``None`` content becomes ``""``.
     """
@@ -302,7 +331,11 @@ async def call_llm(
     )
 
     kwargs = build_completion_kwargs(
-        model=model, messages=messages, temperature=temperature, json_mode=json_mode
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        json_mode=json_mode,
+        json_schema=json_schema,
     )
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens

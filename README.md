@@ -234,6 +234,15 @@ documents flow through the identical chunk → score → rank → verify pipelin
 corpus answer carries the same verbatim-quote citations and confidence tiers as a
 web answer.
 
+**Tier ceiling for corpus-only answers.** Every ingested chunk is cited under the
+synthetic host `corpus.local` (`https://corpus.local/doc/{id}#chunk-N`), so a
+corpus-only answer is a single "domain": it cannot reach Tier 2 (Multi-Domain),
+and it reaches Tier 1 only if you add `corpus.local` to
+`AXIOM_AUTHORITATIVE_DOMAINS` — which would make *every* ingested document
+authoritative, including anything a key holder uploads. Expect verified corpus
+claims at Tier 3. Citations carry your ingest `source` label as
+`citation.source.source_label`.
+
 Enable it by pointing `AXIOM_CORPUS_DB_PATH` at a SQLite file and choosing where
 the retriever draws from with `AXIOM_RETRIEVAL_SOURCE`:
 

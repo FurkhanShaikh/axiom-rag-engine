@@ -14,10 +14,12 @@ DAG topology:
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable
 from typing import Any, Literal, cast
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -96,7 +98,21 @@ _DERIVED_CHUNK_FIELDS = (
 )
 
 
-async def retriever_with_retry(state: GraphState) -> dict:
+def _accepts_config(fn: Callable[..., Any]) -> bool:
+    try:
+        return "config" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+async def _call_node(fn: Callable[..., Any], state: GraphState, config: Any) -> Any:
+    """Invoke a node, handing it the run config only if it declares one."""
+    if _accepts_config(fn):
+        return await fn(state, config)
+    return await fn(state)
+
+
+async def retriever_with_retry(state: GraphState, config: RunnableConfig | None = None) -> dict:
     """Re-retrieve after the rewrite budget is spent, keeping the best evidence.
 
     Fresh search results (URLs not seen before) are merged with the previous
@@ -104,7 +120,7 @@ async def retriever_with_retry(state: GraphState) -> dict:
     throws away the best ones it already had. Increments
     retrieval_retry_count and resets per-round verification state.
     """
-    result = await retriever_node(state)
+    result: dict[str, Any] = await _call_node(retriever_node, state, config)
     retained = [
         {k: v for k, v in chunk.items() if k not in _DERIVED_CHUNK_FIELDS}
         for chunk in (state.get("ranked_chunks") or [])
@@ -137,9 +153,12 @@ async def retriever_with_retry(state: GraphState) -> dict:
 def _timed_node(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap an async graph node function to record wall-clock duration."""
 
-    async def _wrapper(state: GraphState) -> dict:
+    # LangGraph injects the run config into nodes that declare a ``config``
+    # parameter; the wrapper declares it and forwards it to nodes that want it
+    # (the retriever reads its search backend from it).
+    async def _wrapper(state: GraphState, config: RunnableConfig) -> dict:
         start = time.monotonic()
-        result = await fn(state)
+        result = await _call_node(fn, state, config)
         NODE_DURATION.labels(node=name).observe(time.monotonic() - start)
         return cast(dict[str, Any], result)
 

@@ -1,0 +1,325 @@
+"""The pipeline endpoints: POST /v1/synthesize and its SSE twin."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from slowapi import Limiter
+
+from axiom_rag_engine.api.auth import verify_api_key
+from axiom_rag_engine.api.deps import Services
+from axiom_rag_engine.api.routes.audits import audit_owner, persist_and_emit_audit
+from axiom_rag_engine.api.sse import stream_pipeline
+from axiom_rag_engine.config.logging import request_id_ctx
+from axiom_rag_engine.config.observability import (
+    CACHE_HITS,
+    CACHE_MISSES,
+    PIPELINE_DURATION,
+    REQUESTS_BY_STATUS,
+    TIER_ASSIGNMENTS,
+)
+from axiom_rag_engine.config.settings import Settings
+from axiom_rag_engine.marshalling import make_error_response, marshal_response
+from axiom_rag_engine.models import AxiomRequest, AxiomResponse
+from axiom_rag_engine.services import AppServices
+from axiom_rag_engine.state import GraphState, make_initial_state
+from axiom_rag_engine.utils.llm import (
+    LLMBudgetExceededError,
+    get_llm_usage_snapshot,
+    reset_llm_budget,
+)
+
+logger = logging.getLogger("axiom_rag_engine")
+
+# ---------------------------------------------------------------------------
+# Server-enforced request policy
+# ---------------------------------------------------------------------------
+
+
+def effective_app_config(payload: AxiomRequest, settings: Settings) -> dict[str, Any]:
+    """The caller's app_config with trust policy replaced by server settings."""
+    effective = payload.app_config.model_dump()
+    ignored_fields = [
+        field
+        for field in ("authoritative_domains", "low_quality_domains", "exclude_default_domains")
+        if effective.get(field)
+    ]
+    if ignored_fields:
+        logger.warning(
+            "Ignoring caller trust-policy overrides for request %s: %s",
+            payload.request_id,
+            ", ".join(ignored_fields),
+        )
+    effective["authoritative_domains"] = list(settings.authoritative_domains)
+    effective["low_quality_domains"] = list(settings.low_quality_domains)
+    effective["exclude_default_domains"] = list(settings.exclude_default_domains)
+    return effective
+
+
+def effective_pipeline_config(payload: AxiomRequest, settings: Settings) -> dict[str, Any]:
+    """The caller's pipeline_config with semantic verification set by server policy."""
+    effective = payload.pipeline_config.model_dump()
+    server_semantic = settings.semantic_verification_enabled
+    requested = bool(effective["stages"].get("semantic_verification_enabled", True))
+    if requested != server_semantic:
+        logger.warning(
+            "Ignoring caller semantic_verification_enabled=%s for request %s; server policy is %s.",
+            requested,
+            payload.request_id,
+            server_semantic,
+        )
+    effective["stages"]["semantic_verification_enabled"] = server_semantic
+    return effective
+
+
+def _initial_state(payload: AxiomRequest, services: AppServices) -> GraphState:
+    """Build the graph input from the request and server policy (both endpoints)."""
+    models_config = payload.models.model_dump()
+    # Prefer the caller's explicit choice; fall back to the startup-detected
+    # defaults (which already account for available API keys).
+    if not models_config.get("synthesizer"):
+        models_config["synthesizer"] = services.default_synthesizer_model
+    if not models_config.get("verifier"):
+        models_config["verifier"] = services.default_verifier_model
+    return make_initial_state(
+        request_id=payload.request_id,
+        user_query=payload.user_query,
+        app_config=effective_app_config(payload, services.settings),
+        models_config=models_config,
+        pipeline_config=effective_pipeline_config(payload, services.settings),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Response cache
+# ---------------------------------------------------------------------------
+
+
+def cache_key(
+    payload: AxiomRequest,
+    api_key: str | None,
+    app_config: dict[str, Any],
+    pipeline_config: dict[str, Any],
+) -> str:
+    """
+    SHA-256 of the request fields that shape the response body, namespaced by
+    a hash of the caller's API key.
+
+    Namespacing prevents cross-tenant cache poisoning: two callers with different
+    API keys cannot serve each other's cached results even when all other fields
+    match. The full 64-hex digest keeps collisions out of reach at any scale.
+    """
+    key_namespace = hashlib.sha256((api_key or "anonymous").encode()).hexdigest()
+    raw = json.dumps(
+        {
+            "ns": key_namespace,
+            "query": payload.user_query,
+            "models": payload.models.model_dump(),
+            "pipeline": pipeline_config,
+            "app": app_config,
+            "include_debug": payload.include_debug,
+        },
+        sort_keys=True,
+    )
+    # Prefix with the namespace so backends that scan (Redis) always see the
+    # tenant boundary.
+    body_hash = hashlib.sha256(raw.encode()).hexdigest()
+    return f"{key_namespace}:{body_hash}"
+
+
+def _response_to_cache_value(response: AxiomResponse) -> dict[str, Any]:
+    """Serialize a response without request-scoped identifiers for safe reuse."""
+    data = response.model_dump()
+    data.pop("request_id", None)
+    return data
+
+
+def _hydrate_cached_response(request_id: str, cached: dict[str, Any]) -> AxiomResponse:
+    """Rebuild a response for the current request from cached template data.
+
+    Strips the stored ``usage`` block: a cache hit consumes zero tokens and zero
+    cost, so the caller's billing view reflects *this* request.
+    """
+    data = copy.deepcopy(cached)
+    data["usage"] = None
+    return AxiomResponse.model_validate({"request_id": request_id, **data})
+
+
+async def _get_cached(services: AppServices, key: str, request_id: str) -> AxiomResponse | None:
+    cached = await services.cache.get(key)
+    return None if cached is None else _hydrate_cached_response(request_id, cached)
+
+
+async def _set_cached(services: AppServices, key: str, response: AxiomResponse) -> None:
+    # Cache successful and partial responses only — not errors or unanswerable.
+    if response.status in ("success", "partial"):
+        await services.cache.set(key, _response_to_cache_value(response))
+
+
+def _record_outcome_metrics(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
+    REQUESTS_BY_STATUS.labels(status=response.status).inc()
+    for sentence in graph_result.get("final_sentences", []):
+        tier = sentence.get("verification", {}).get("tier", 3)
+        TIER_ASSIGNMENTS.labels(tier=str(tier)).inc()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+
+async def synthesize(
+    services: Services,
+    payload: AxiomRequest,
+    _api_key: str | None = Depends(verify_api_key),
+) -> Response:
+    """
+    Accept an AxiomRequest, execute the LangGraph DAG, and return a fully
+    validated AxiomResponse with tier breakdown and confidence score.
+
+    Pipeline errors return HTTP 500 and budget exhaustion HTTP 429; successful,
+    partial, and unanswerable results return HTTP 200.
+    """
+    request_id_ctx.set(payload.request_id)
+    initial_state = _initial_state(payload, services)
+
+    key = cache_key(
+        payload, _api_key, initial_state["app_config"], initial_state["pipeline_config"]
+    )
+    cached = await _get_cached(services, key, payload.request_id)
+    if cached is not None:
+        CACHE_HITS.inc()
+        logger.info("Cache hit for request %s", payload.request_id)
+        REQUESTS_BY_STATUS.labels(status=cached.status).inc()
+        return JSONResponse(content=cached.model_dump())
+    CACHE_MISSES.inc()
+
+    # Initialize the per-request LLM call budget. The mutable dict stored in the
+    # ContextVar is shared by all asyncio tasks spawned from this coroutine.
+    reset_llm_budget()
+
+    try:
+        with PIPELINE_DURATION.time():
+            graph_result = await services.engine.ainvoke(
+                initial_state, config=services.run_config()
+            )
+    except LLMBudgetExceededError as exc:
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
+        return JSONResponse(status_code=429, content=error_resp.model_dump())
+    except Exception as exc:
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
+        return JSONResponse(status_code=500, content=error_resp.model_dump())
+
+    response = marshal_response(
+        payload.request_id,
+        graph_result,
+        payload.include_debug,
+        get_llm_usage_snapshot(),
+    )
+    _record_outcome_metrics(response, graph_result)
+    persist_and_emit_audit(
+        services,
+        payload.request_id,
+        response.status,
+        graph_result,
+        usage_snapshot=response.usage.model_dump() if response.usage else None,
+        owner=audit_owner(_api_key),
+    )
+    await _set_cached(services, key, response)
+    return JSONResponse(content=response.model_dump())
+
+
+async def synthesize_stream(
+    services: Services,
+    request: Request,
+    payload: AxiomRequest,
+    _api_key: str | None = Depends(verify_api_key),
+) -> Response:
+    """Stream pipeline progress as Server-Sent Events.
+
+    Same request body as ``POST /v1/synthesize``. Emits one SSE frame per
+    pipeline stage plus a ``complete`` frame carrying the full AxiomResponse.
+    Sentences appear in ``sentence`` frames only after the final verification
+    pass, each with its verification result — including sentences that failed
+    or could not be verified, which are labelled (as in the JSON response), not
+    hidden. Draft text from intermediate passes never reaches the client.
+
+    Disconnect behavior: if the client drops mid-stream the pipeline is
+    cancelled — in-flight LLM calls are unwound and no further budget is
+    consumed. Audit trails, metrics, and cache writes happen only for runs
+    that stream to completion.
+    """
+    request_id_ctx.set(payload.request_id)
+    initial_state = _initial_state(payload, services)
+
+    key = cache_key(
+        payload, _api_key, initial_state["app_config"], initial_state["pipeline_config"]
+    )
+    cached = await _get_cached(services, key, payload.request_id)
+    if cached is not None:
+        CACHE_HITS.inc()
+        REQUESTS_BY_STATUS.labels(status=cached.status).inc()
+    else:
+        CACHE_MISSES.inc()
+        reset_llm_budget()
+
+    async def _on_complete(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
+        """Post-pipeline housekeeping: metrics, audit, cache."""
+        _record_outcome_metrics(response, graph_result)
+        persist_and_emit_audit(
+            services,
+            payload.request_id,
+            response.status,
+            graph_result,
+            usage_snapshot=response.usage.model_dump() if response.usage else None,
+            owner=audit_owner(_api_key),
+        )
+        await _set_cached(services, key, response)
+
+    return StreamingResponse(
+        stream_pipeline(
+            payload=payload,
+            engine=services.engine,
+            initial_state=initial_state,
+            cached_response=cached,
+            on_complete=_on_complete,
+            run_config=services.run_config(),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def build_router(limiter: Limiter, stream_rate_limit: str) -> APIRouter:
+    """The pipeline routes, with the stream endpoint bound to ``limiter``.
+
+    Built per app because slowapi binds a route-specific limit to a limiter
+    instance at decoration time.
+    """
+    router = APIRouter()
+    router.add_api_route(
+        "/v1/synthesize",
+        synthesize,
+        methods=["POST"],
+        response_model=AxiomResponse,
+        summary="Run the Axiom Engine verification pipeline.",
+    )
+    router.add_api_route(
+        "/v1/synthesize/stream",
+        limiter.limit(stream_rate_limit)(synthesize_stream),
+        methods=["POST"],
+        summary="Run the Axiom Engine pipeline with SSE progress events.",
+    )
+    return router

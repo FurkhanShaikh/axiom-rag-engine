@@ -216,6 +216,35 @@ fast model the operator chooses — the same pattern as the synthesizer/verifier
 The eval justifies the feature; latency justifies keeping it off by default and
 model-agnostic.
 
+### Query expansion — live web (2026-09-22)
+
+Do the retriever's extra searches earn their cost? `evals/query_expansion_eval.py`
+ran the 15 answerable golden questions through the production retriever → scorer
+→ ranker over **live Tavily results** (full-page content, BM25 ranking), in three
+configurations. Web results carry no relevance labels, so the top-5 chunks were
+graded 0–3 by an LLM judge (`ollama/qwen3.5:9b`, the reranker's grading prompt,
+pooled across configurations).
+
+| config | grade@5 | nDCG@5 | prec@5 (grade ≥ 2) | domains in top 10 | searches / question |
+|---|---|---|---|---|---|
+| original query only | 2.573 | **0.861** | 0.907 | 3.60 | **1.0** |
+| legacy: + "What is q" + "Explain q" | 2.507 | 0.828 | 0.893 | **4.07** | 2.6 |
+| + one LLM keyword rewrite | **2.613** | 0.856 | **0.933** | 3.80 | 2.0 (+1 LLM call) |
+
+**Decision.** The legacy reformulations (production until this run) spent 2.6×
+the searches and were slightly *worse* on every relevance metric; their only
+gain was ~0.5 more distinct domains. They were removed: the first retrieval pass
+now sends the original query only (~60% fewer web searches). The LLM rewrite
+was a tie with original-only on relevance, so it was not worth an extra search
+plus an LLM call. Retry-pass reformulations were kept — a retry skips URLs it
+has already seen, so the original query alone would surface nothing new.
+
+**Caveats.** 15 questions is a small sample and the judge is a local 9B model:
+read this as "no benefit", not "proven harm". Live search results drift; the
+Tavily responses behind these numbers are cached in
+`evals/data/query_expansion_cache.json` (gitignored) so the run can be re-graded
+with another judge at no search cost.
+
 ### Verification
 
 > **Not yet recorded for the production model.** The semantic table is populated
@@ -312,9 +341,10 @@ ceiling) once you want the full keyed run gated nightly.
 - **Small local models score lower.** Ollama models will underperform cloud
   models on the semantic layer — compare like against like, never a local run
   against a cloud baseline.
-- **BM25 relevance is 0 for non-Latin queries** (the tokenizer is ASCII-only),
-  so the Arabic and CJK golden cases rank on quality score alone. This is a
-  known retrieval limitation, tracked for the hybrid-retrieval work.
+- **CJK lexical matching is approximate.** The BM25 tokenizer is Unicode-aware
+  (Arabic, accented Latin, …) and splits CJK/Thai runs into character bigrams —
+  the standard dictionary-free approach, but weaker than a real segmenter. It
+  did not change the SciFact numbers above (English).
 - **Tier calibration is not yet measured.** Whether Tier 1 correlates with
   actual answer correctness needs labeled answer correctness, which the current
   seed set is too small to provide. That arrives with a larger pinned-corpus

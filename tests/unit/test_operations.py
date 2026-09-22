@@ -82,7 +82,7 @@ def test_audit_endpoint_returns_retained_entry(monkeypatch, client) -> None:
             "audit_trail": [{"node": "retriever", "event_type": "start"}],
         },
     )
-    app.state.audit_store = store
+    app.state.services.audit_store = store
 
     resp = client.get("/v1/audits/req_001")
     assert resp.status_code == 200
@@ -94,7 +94,7 @@ def test_audit_endpoint_returns_retained_entry(monkeypatch, client) -> None:
 def test_audit_endpoint_returns_404_for_unknown_id(monkeypatch, client) -> None:
     from axiom_rag_engine.main import app
 
-    app.state.audit_store = AuditStore(maxsize=5)
+    app.state.services.audit_store = AuditStore(maxsize=5)
     resp = client.get("/v1/audits/never_heard_of")
     assert resp.status_code == 404
 
@@ -122,7 +122,7 @@ def test_status_endpoint_reports_core_fields(client) -> None:
 def test_status_endpoint_reflects_audit_retention(monkeypatch, client) -> None:
     from axiom_rag_engine.main import app
 
-    app.state.audit_store = AuditStore(maxsize=42)
+    app.state.services.audit_store = AuditStore(maxsize=42)
     resp = client.get("/v1/status")
     assert resp.status_code == 200
     body = resp.json()

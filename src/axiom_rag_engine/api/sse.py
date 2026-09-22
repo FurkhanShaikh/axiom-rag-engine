@@ -124,12 +124,14 @@ async def stream_pipeline(
     initial_state: GraphState,
     cached_response: AxiomResponse | None = None,
     on_complete: Any | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE frames for one pipeline execution.
 
     ``on_complete`` is awaited with ``(AxiomResponse, accumulated_state)``
     immediately before the ``complete`` frame — use it for cache writes,
-    Prometheus updates, and audit persistence.
+    Prometheus updates, and audit persistence. ``run_config`` is forwarded to
+    LangGraph (it carries the app's search backend).
     """
     event_id = 0
 
@@ -170,7 +172,10 @@ async def stream_pipeline(
     pending_event: asyncio.Task[Any] | None = None
     timeout_task: asyncio.Task[Any] | None = None
     try:
-        it = engine.astream_events(initial_state, version="v2").__aiter__()
+        stream_kwargs: dict[str, Any] = {"version": "v2"}
+        if run_config is not None:
+            stream_kwargs["config"] = run_config
+        it = engine.astream_events(initial_state, **stream_kwargs).__aiter__()
         while True:
             if pending_event is None:
                 pending_event = asyncio.ensure_future(_next(it))

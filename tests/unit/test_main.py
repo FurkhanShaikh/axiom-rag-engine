@@ -101,9 +101,6 @@ _SEARCH_RESULTS = [
 
 @pytest.fixture()
 def client(monkeypatch):
-    # Clear the response cache before each test to prevent cross-test interference.
-    if hasattr(_main_module, "_response_cache") and hasattr(_main_module._response_cache, "clear"):
-        _main_module._response_cache.clear()
     # Remove TAVILY_API_KEY so the lifespan uses MockSearchBackend, not real Tavily.
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.setenv("AXIOM_ENV", "test")
@@ -347,7 +344,7 @@ class TestErrorHandling:
     def test_graph_exception_returns_error_status(self, client: TestClient) -> None:
         """If the graph itself raises, the endpoint returns HTTP 500 with a
         structured AxiomResponse body (H4 fix: was incorrectly 200 before)."""
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(side_effect=RuntimeError("LangGraph internal failure"))
             resp = client.post("/v1/synthesize", json=_VALID_REQUEST)
 
@@ -363,7 +360,7 @@ class TestErrorHandling:
         assert "Internal pipeline error" in data["error_message"]
 
     def test_error_response_is_valid_axiom_response(self, client: TestClient) -> None:
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(side_effect=RuntimeError("crash"))
             resp = client.post("/v1/synthesize", json=_VALID_REQUEST)
 
@@ -411,7 +408,7 @@ class TestValidationErrors:
     def test_valid_minimal_payload_accepted(self, client: TestClient) -> None:
         """Minimal payload with only required fields should be accepted."""
         minimal = {"request_id": "req_min", "user_query": "Test query"}
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(
                 return_value={"is_answerable": False, "final_sentences": []}
             )
@@ -436,7 +433,7 @@ class TestValidationErrors:
                 "exclude_default_domains": ["reddit.com"],
             },
         }
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(
                 return_value={"is_answerable": False, "final_sentences": []}
             )
@@ -457,7 +454,7 @@ class TestValidationErrors:
             "user_query": "What is a battery?",
             "pipeline_config": {"stages": {"semantic_verification_enabled": False}},
         }
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(
                 return_value={"is_answerable": False, "final_sentences": []}
             )
@@ -485,7 +482,7 @@ class TestCacheIsolation:
             "is_answerable": True,
             "final_sentences": [make_final_sentence_dict(tier=1)],
         }
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(return_value=graph_result)
             first = client.post("/v1/synthesize", json={**_VALID_REQUEST, "request_id": "req_a"})
             second = client.post("/v1/synthesize", json={**_VALID_REQUEST, "request_id": "req_b"})
@@ -504,7 +501,7 @@ class TestCacheIsolation:
             "indexed_chunks": _SAMPLE_CHUNKS,
             "ranked_chunks": _SAMPLE_CHUNKS,
         }
-        with patch.object(app.state, "engine", create=True) as mock_engine:
+        with patch.object(app.state.services, "engine") as mock_engine:
             mock_engine.ainvoke = AsyncMock(return_value=graph_result)
             no_debug = client.post(
                 "/v1/synthesize", json={**_VALID_REQUEST, "include_debug": False}
@@ -526,8 +523,11 @@ class TestAuthMode:
         monkeypatch.delenv("AXIOM_API_KEYS", raising=False)
 
         async def _run() -> None:
+            from axiom_rag_engine.api.auth import check_api_key
+            from axiom_rag_engine.config.settings import get_settings
+
             with pytest.raises(_main_module.HTTPException) as exc_info:
-                await _main_module.verify_api_key(None)
+                check_api_key(None, get_settings())
             # 503 (Service Unavailable): auth is required but no keys are configured.
             # Orchestrators that retry on 503 will recover once keys are supplied,
             # while 500 would be misread as a permanent crash.

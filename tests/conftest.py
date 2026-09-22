@@ -13,7 +13,6 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-import axiom_rag_engine.main as _main_module
 from axiom_rag_engine.config.settings import Settings, get_settings
 from axiom_rag_engine.main import app
 from axiom_rag_engine.nodes.retriever import MockSearchBackend, set_search_backend
@@ -159,8 +158,7 @@ def _reset_settings_cache(monkeypatch):
 
 @pytest.fixture()
 def client(monkeypatch):
-    """TestClient fixture with clean cache and no Tavily key."""
-    _main_module._response_cache.clear()
+    """TestClient fixture with no Tavily key (each app startup gets a fresh cache)."""
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.setenv("AXIOM_ENV", "test")
     monkeypatch.delenv("AXIOM_API_KEYS", raising=False)

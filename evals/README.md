@@ -13,6 +13,7 @@ normalization, ranking, or tier logic.
 | 2 | `e2e_eval.py` | `golden/seed.jsonl` (committed, hand-curated) | Full pipeline behavior: answerability, tier assignment, Tier-5 leakage, non-Latin support |
 | 3 | `retrieval_eval.py` | SciFact (dev split) | Retrieval quality: does the ranker surface the gold evidence document near the top? (recall@k, nDCG@10, MRR) |
 | 4 | `corpus_eval.py` | SciFact / BEIR | Bring-your-own-corpus retrieval: ingests a dataset through the **production** `ingest_text` + `CorpusStore.search` and scores document-level recall@k / nDCG / MRR. Exercises the shipped ingest→store→search path (chunking + SQLite round trip), not a lookalike. Needs a live embedding model. |
+| 5 | `query_expansion_eval.py` | Golden-set questions × live Tavily (cached) | Whether the retriever's extra searches earn their cost: compares original-only, the production reformulations, and an LLM keyword rewrite through the production retriever → scorer → ranker, graded 0-3 by an LLM judge (pooled top-k). Reports grade@k, nDCG@k, precision@k, domain diversity, and searches per question. Search results are cached, so reruns spend no credits. |
 
 ### Why SciFact for Layer 3
 

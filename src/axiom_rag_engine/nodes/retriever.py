@@ -231,34 +231,23 @@ def generate_search_queries(
     """
     Generate search queries from the user query.
 
-    On first retrieval (rewrite_requests is None or empty) returns the original
-    query plus simple reformulations.
+    First retrieval: the original query only. The retriever used to add
+    "What is <q>" and "Explain <q>"; measured with evals/query_expansion_eval.py
+    (15 questions, live Tavily, LLM-judged top-5 — see BENCHMARKS.md) they cost
+    2.6x the searches for no relevance gain (grade@5 2.51 vs 2.57, nDCG@5 0.83
+    vs 0.86), so they were dropped.
 
-    On re-retrieval after a failed rewrite loop (rewrite_requests is non-empty),
-    generic reformulations ("<query> details", "<query> evidence facts") are
-    used to pull different results; URLs already seen are skipped by the
-    retriever, and the retry node (graph.retriever_with_retry) keeps the previous
-    round's best chunks alongside the fresh ones. The failure context itself is
-    deliberately NOT put into the search query (it would leak internal verifier
-    text to the search provider).
+    Re-retrieval after a failed rewrite loop (``rewrite_requests`` non-empty):
+    URLs already seen are skipped, so the original query alone would surface
+    nothing new; generic reformulations pull different results, and the retry
+    node (graph.retriever_with_retry) keeps the previous round's best chunks
+    alongside them. The failure context itself is deliberately NOT put into the
+    search query (it would leak internal verifier text to the search provider).
     """
     queries = [user_query]
-    lower = user_query.lower().strip()
-
     if rewrite_requests:
-        # Generate varied formulation to force the search engine to return fresh
-        # sources without polluting the query with internal stack traces.
-        if f"{user_query} details" not in queries:
-            queries.append(f"{user_query} details")
-        if f"{user_query} evidence facts" not in queries:
-            queries.append(f"{user_query} evidence facts")
-    else:
-        # First-pass reformulations.
-        if not lower.startswith("what is") and not lower.startswith("what are"):
-            queries.append(f"What is {user_query}")
-        if not lower.startswith("explain"):
-            queries.append(f"Explain {user_query}")
-
+        queries.append(f"{user_query} details")
+        queries.append(f"{user_query} evidence facts")
     return queries
 
 
@@ -369,18 +358,33 @@ def set_search_backend(backend: SearchBackend) -> None:
     _search_backend = backend
 
 
+def _backend_from_config(config: Any) -> SearchBackend:
+    """The app's backend from the LangGraph run config, else the module default.
+
+    Apps pass their backend as ``configurable.search_backend`` so several apps
+    (or configurations) can coexist in one process; direct callers — tests,
+    evals — keep using :func:`set_search_backend`.
+    """
+    if isinstance(config, dict):
+        backend = (config.get("configurable") or {}).get("search_backend")
+        if backend is not None:
+            return backend  # type: ignore[no-any-return]
+    return _search_backend
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=4),
     reraise=True,
 )
-def _search_with_retry(query: str) -> list[dict[str, Any]]:
+def _search_with_retry(query: str, backend: SearchBackend) -> list[dict[str, Any]]:
     """Execute a search with exponential-backoff retry (3 attempts)."""
-    return _search_backend.search(query)
+    return backend.search(query)
 
 
 async def _safe_search(
     query: str,
+    backend: SearchBackend,
 ) -> tuple[str, list[dict[str, Any]], Exception | None]:
     """
     Execute one search query asynchronously (Tavily client is synchronous, so
@@ -390,14 +394,14 @@ async def _safe_search(
     Returns (query, results, error_or_None).
     """
     try:
-        results = await asyncio.to_thread(_search_with_retry, query)
+        results = await asyncio.to_thread(_search_with_retry, query, backend)
         return query, results, None
     except Exception as exc:  # intentional: isolate per-query failure
         logger.warning("Search query %r failed: %s", query, exc)
         return query, [], exc
 
 
-async def retriever_node(state: GraphState) -> dict[str, Any]:
+async def retriever_node(state: GraphState, config: Any = None) -> dict[str, Any]:
     """
     LangGraph node — Retrieval & Indexing.
 
@@ -445,7 +449,8 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
     # Tavily is a sync client, so _safe_search wraps it in asyncio.to_thread.
     tracer = get_tracer()
     with tracer.start_as_current_span("retriever.search", attributes={"query_count": len(queries)}):
-        search_outcomes = list(await asyncio.gather(*[_safe_search(q) for q in queries]))
+        backend = _backend_from_config(config)
+        search_outcomes = list(await asyncio.gather(*[_safe_search(q, backend) for q in queries]))
 
     # Phase 1: collect every document's candidate chunks (IDs, dedup, audit).
     per_doc: list[list[dict[str, Any]]] = []

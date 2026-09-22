@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.models import SynthesizerOutput
+from axiom_rag_engine.schemas import SYNTHESIZER_SCHEMA
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
 from axiom_rag_engine.utils.llm import LLMBudgetExceededError, call_llm, parse_json_object
@@ -212,6 +213,13 @@ def _parse_llm_response(raw: str) -> SynthesizerOutput:
     Raises ValueError if the JSON is invalid or fails Pydantic validation.
     """
     data = parse_json_object(raw)
+    # ``is_cited`` is redundant with ``citations``, and small models get the flag
+    # wrong while producing usable citations. Derive it instead of spending a
+    # parse retry: every citation is still verified, and a sentence without
+    # citations is labelled unverified downstream either way.
+    for sentence in data.get("sentences") or []:
+        if isinstance(sentence, dict) and isinstance(sentence.get("citations", []), list):
+            sentence["is_cited"] = bool(sentence.get("citations"))
     try:
         return SynthesizerOutput.model_validate(data)
     except ValidationError as exc:
@@ -373,7 +381,13 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
         # 0.0 (deterministic); subsequent attempts step up to 0.3.
         temperature = 0.0 if attempt == 1 else 0.3
         try:
-            raw_content = await call_llm("synthesizer", model, messages, temperature=temperature)
+            raw_content = await call_llm(
+                "synthesizer",
+                model,
+                messages,
+                temperature=temperature,
+                json_schema=("synthesizer_output", SYNTHESIZER_SCHEMA),
+            )
             output = _parse_llm_response(raw_content)
             break
 

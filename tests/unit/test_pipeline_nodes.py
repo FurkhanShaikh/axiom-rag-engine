@@ -175,16 +175,18 @@ class TestChunkIntoParagraphs:
 
 
 class TestQueryExpansion:
-    def test_generates_three_queries(self) -> None:
-        queries = generate_search_queries("quantum computing")
-        assert len(queries) == 3
-        assert queries[0] == "quantum computing"
+    def test_first_pass_searches_the_original_query_only(self) -> None:
+        # Measured (evals/query_expansion_eval.py, BENCHMARKS.md): the old
+        # "What is"/"Explain" reformulations cost 2.6x the searches with no
+        # relevance gain, so the first pass sends the question as asked.
+        assert generate_search_queries("quantum computing") == ["quantum computing"]
 
-    def test_no_duplicate_what_is(self) -> None:
-        queries = generate_search_queries("What is quantum computing")
-        # Should not add another "What is" reformulation.
-        what_is_count = sum(1 for q in queries if q.lower().startswith("what is"))
-        assert what_is_count == 1
+    def test_retry_pass_adds_reformulations_for_fresh_results(self) -> None:
+        # A retry skips URLs already seen, so repeating the original query alone
+        # would surface nothing new; reformulations pull different results.
+        queries = generate_search_queries("quantum computing", rewrite_requests=["x"])
+        assert queries[0] == "quantum computing"
+        assert len(queries) > 1
 
 
 class TestDomainFiltering:

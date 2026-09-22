@@ -1,8 +1,11 @@
 """
 Axiom Engine — API key authentication.
 
-Extracted from main.py to follow SRP. Provides the ``verify_api_key``
-FastAPI dependency for protecting endpoints.
+Provides the ``verify_api_key`` FastAPI dependency for protecting endpoints.
+Keys and the auth mode come from the *app's* settings (``AppServices.settings``)
+when the request belongs to a running app, so apps built by ``create_app`` with
+explicit settings authenticate against their own configuration. Outside an app
+(direct calls, tests) the process settings are used.
 """
 
 from __future__ import annotations
@@ -11,27 +14,31 @@ import functools
 import hashlib
 import hmac
 
-from fastapi import HTTPException, Security
+from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import Settings, get_settings
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def _app_env() -> str:
-    """Return the current runtime environment (defaults to 'production')."""
-    return get_settings().env.lower()
+def settings_from_request(request: Request | None) -> Settings:
+    """The settings governing ``request``: its app's, else the process settings."""
+    app = request.scope.get("app") if request is not None else None
+    services = getattr(getattr(app, "state", None), "services", None)
+    if services is not None:
+        return services.settings  # type: ignore[no-any-return]
+    return get_settings()
 
 
-def _api_keys() -> set[str]:
-    """Read valid API keys from the current environment."""
-    return {k for k in get_settings().api_keys if k}
+def _api_keys(settings: Settings | None = None) -> set[str]:
+    """Valid API keys from ``settings`` (process settings by default)."""
+    return {k for k in (settings or get_settings()).api_keys if k}
 
 
-def _auth_required() -> bool:
-    """Return True unless AXIOM_ENV is explicitly set to a non-production value."""
-    return get_settings().auth_required()
+def _auth_required(settings: Settings | None = None) -> bool:
+    """True unless the runtime env is explicitly a non-production alias."""
+    return (settings or get_settings()).auth_required()
 
 
 @functools.cache
@@ -54,8 +61,7 @@ def _hashed_key_check(presented: str, valid_keys: set[str]) -> bool:
     Compares the SHA-256 hash of the presented key against the pre-computed
     hashes of all valid keys using ``hmac.compare_digest``.  The loop is NOT
     short-circuited so timing does not leak which key (or how many characters)
-    matched.  Pre-hashing valid keys at startup eliminates the O(N × hash)
-    cost that existed when every request hashed every configured key.
+    matched.
     """
     presented_hash = hashlib.sha256(presented.encode()).hexdigest()
     hashed_valid = _pre_hashed_keys(tuple(sorted(valid_keys)))
@@ -66,26 +72,27 @@ def _hashed_key_check(presented: str, valid_keys: set[str]) -> bool:
     return matched
 
 
-def is_valid_api_key(presented: str) -> bool:
+def is_valid_api_key(presented: str, settings: Settings | None = None) -> bool:
     """Return True when ``presented`` matches a configured API key.
 
     Non-raising variant of the ``verify_api_key`` check, for callers that need
     a boolean (e.g. rate-limit bucketing) rather than an HTTP 401. Returns
     False when no keys are configured.
     """
-    valid_keys = _api_keys()
+    valid_keys = _api_keys(settings)
     if not valid_keys:
         return False
     return _hashed_key_check(presented, valid_keys)
 
 
-async def verify_api_key(
-    api_key: str | None = Security(_api_key_header),
-) -> str | None:
-    """Validate the API key if authentication is enabled."""
-    valid_keys = _api_keys()
+def check_api_key(api_key: str | None, settings: Settings) -> str | None:
+    """Validate ``api_key`` against ``settings``; raise HTTPException if refused.
+
+    Returns the key (or None when auth is disabled).
+    """
+    valid_keys = _api_keys(settings)
     if not valid_keys:
-        if _auth_required():
+        if _auth_required(settings):
             # Misconfigured production: auth is required but no keys are defined.
             # 503 (Service Unavailable) — the server is not ready to handle requests
             # until AXIOM_API_KEYS is configured. Clients and load-balancers that
@@ -96,3 +103,11 @@ async def verify_api_key(
     if not api_key or not _hashed_key_check(api_key, valid_keys):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
     return api_key
+
+
+async def verify_api_key(
+    request: Request,
+    api_key: str | None = Security(_api_key_header),
+) -> str | None:
+    """FastAPI dependency: validate the API key against the app's settings."""
+    return check_api_key(api_key, settings_from_request(request))

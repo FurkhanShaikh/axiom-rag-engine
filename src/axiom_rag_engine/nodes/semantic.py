@@ -46,6 +46,11 @@ from axiom_rag_engine.models import (
     VerifiedCitation,
 )
 from axiom_rag_engine.nodes.scorer import build_primary_domain_set, is_primary_source
+from axiom_rag_engine.schemas import (
+    CONTRADICTION_SCHEMA,
+    CORROBORATION_SCHEMA,
+    SEMANTIC_VERDICT_SCHEMA,
+)
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
 from axiom_rag_engine.utils.llm import call_llm, parse_json_object
@@ -534,7 +539,9 @@ async def _check_corroboration(
             ),
         },
     ]
-    raw = await call_llm("corroboration", model, messages)
+    raw = await call_llm(
+        "corroboration", model, messages, json_schema=("corroboration", CORROBORATION_SCHEMA)
+    )
     return _parse_corroboration_response(raw)
 
 
@@ -680,7 +687,9 @@ async def _check_contradiction(
             ),
         },
     ]
-    raw = await call_llm("contradiction", model, messages)
+    raw = await call_llm(
+        "contradiction", model, messages, json_schema=("contradiction", CONTRADICTION_SCHEMA)
+    )
     return _parse_contradiction_response(raw)
 
 
@@ -723,7 +732,9 @@ async def _verify_citation(
         },
     ]
 
-    raw = await call_llm("semantic", model, messages)
+    raw = await call_llm(
+        "semantic", model, messages, json_schema=("semantic_verdict", SEMANTIC_VERDICT_SCHEMA)
+    )
     data = _parse_semantic_response(raw)
 
     if data["semantic_check"] == "failed":

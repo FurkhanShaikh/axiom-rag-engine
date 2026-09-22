@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-import axiom_rag_engine.main as main_module
+import axiom_rag_engine.bootstrap as bootstrap_module
 from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.main import app
 from axiom_rag_engine.nodes.retriever import MockSearchBackend, set_search_backend
@@ -69,9 +69,8 @@ def prod_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("AXIOM_AUDIT_RETENTION", "20")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-    monkeypatch.setattr(main_module, "_list_ollama_models", lambda _base: [])
+    monkeypatch.setattr(bootstrap_module, "_list_ollama_models", lambda _base: [])
     get_settings.cache_clear()
-    main_module._response_cache.clear()
     set_search_backend(
         MockSearchBackend([{"url": "https://example.com/a", "title": "A", "content": _CHUNK_TEXT}])
     )
@@ -81,7 +80,7 @@ def prod_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 
 
 def _synthesize(client: TestClient, key: str, request_id: str, query: str) -> dict:
-    main_module._response_cache.clear()
+    client.portal.call(client.app.state.services.cache.clear)  # type: ignore[union-attr]
     resp = client.post(
         "/v1/synthesize",
         headers={"X-API-Key": key},
@@ -211,7 +210,7 @@ class TestStartupWithExplicitModels:
         monkeypatch.setenv("AXIOM_ENV", "production")
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        monkeypatch.setattr(main_module, "_list_ollama_models", lambda _base: [])
+        monkeypatch.setattr(bootstrap_module, "_list_ollama_models", lambda _base: [])
         get_settings.cache_clear()
         return get_settings()
 
@@ -223,7 +222,7 @@ class TestStartupWithExplicitModels:
             AXIOM_DEFAULT_SYNTHESIZER_MODEL="gemini/gemini-2.5-pro",
             AXIOM_DEFAULT_VERIFIER_MODEL="gemini/gemini-2.5-flash",
         )
-        assert main_module._resolve_llm_defaults(settings) == (
+        assert bootstrap_module.resolve_llm_defaults(settings) == (
             "gemini/gemini-2.5-pro",
             "gemini/gemini-2.5-flash",
         )
@@ -235,4 +234,4 @@ class TestStartupWithExplicitModels:
             monkeypatch, AXIOM_DEFAULT_SYNTHESIZER_MODEL="gemini/gemini-2.5-pro"
         )
         with pytest.raises(RuntimeError, match="No LLM provider"):
-            main_module._resolve_llm_defaults(settings)
+            bootstrap_module.resolve_llm_defaults(settings)
