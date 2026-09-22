@@ -27,14 +27,13 @@ from axiom_rag_engine.nodes.retriever import retriever_node
 from axiom_rag_engine.nodes.scorer import scorer_node
 from axiom_rag_engine.nodes.synthesizer import synthesizer_node
 from axiom_rag_engine.nodes.verification import verification_node
-from axiom_rag_engine.state import GraphState, reset_verification_state
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_DEFAULT_MAX_RETRIEVAL_RETRIES = 1  # Fallback when not set in pipeline_config
-
+from axiom_rag_engine.state import (
+    GraphState,
+    loop_limits,
+    reset_verification_state,
+    rewrites_remaining,
+)
+from axiom_rag_engine.utils.audit import make_audit_event
 
 # ---------------------------------------------------------------------------
 # Conditional edge — the verification loop (LLD §4)
@@ -51,7 +50,8 @@ def route_post_verification(
     Routing rules (architecture §5, LLD §4):
       1. If is_answerable is False → END (escape hatch or insufficient data).
       2. If pending_rewrite_count == 0 → END (all citations verified).
-      3. If loop_count < max_rewrite_loops → loop to "synthesizer" (rewrite).
+      3. If fewer than max_rewrite_loops rewrites have run in this retrieval
+         round → loop to "synthesizer" (rewrite).
       4. If loop exhausted but retrieval_retry_count < max_retries → "retriever"
          (re-retrieve with fresh sources).
       5. Otherwise → END (exhaustion).
@@ -65,15 +65,11 @@ def route_post_verification(
         return "__end__"
 
     # Rule 3: rewrite loop
-    pipeline_cfg: dict = state.get("pipeline_config") or {}
-    stages_cfg: dict = pipeline_cfg.get("stages") or {}
-    max_loops: int = stages_cfg.get("max_rewrite_loops", 3)
-
-    if state.get("loop_count", 0) < max_loops:
+    if rewrites_remaining(state, state.get("loop_count", 0)):
         return "synthesizer"
 
     # Rule 4: re-retrieve if rewrites exhausted but retries available
-    max_retries: int = stages_cfg.get("max_retrieval_retries", _DEFAULT_MAX_RETRIEVAL_RETRIES)
+    _, max_retries = loop_limits(state)
     if state.get("retrieval_retry_count", 0) < max_retries:
         return "re_retriever"
 
@@ -86,9 +82,45 @@ def route_post_verification(
 # ---------------------------------------------------------------------------
 
 
+# Scores the scorer/ranker derive. Dropped from retained chunks so the next
+# round re-scores them against the union instead of inheriting stale values.
+_DERIVED_CHUNK_FIELDS = (
+    "source_quality_score",
+    "chunk_quality_score",
+    "quality_score",
+    "relevance_score",
+    "ranking_score",
+    "dense_score",
+    "fused_score",
+    "rerank_grade",
+)
+
+
 async def retriever_with_retry(state: GraphState) -> dict:
-    """Wrapper that runs retriever_node and increments retrieval_retry_count."""
+    """Re-retrieve after the rewrite budget is spent, keeping the best evidence.
+
+    Fresh search results (URLs not seen before) are merged with the previous
+    round's top-ranked chunks, so a retry can only add sources — it never
+    throws away the best ones it already had. Increments
+    retrieval_retry_count and resets per-round verification state.
+    """
     result = await retriever_node(state)
+    retained = [
+        {k: v for k, v in chunk.items() if k not in _DERIVED_CHUNK_FIELDS}
+        for chunk in (state.get("ranked_chunks") or [])
+    ]
+    if retained:
+        fresh_ids = {c["chunk_id"] for c in result.get("indexed_chunks") or []}
+        retained = [c for c in retained if c["chunk_id"] not in fresh_ids]
+        result["indexed_chunks"] = retained + list(result.get("indexed_chunks") or [])
+        result["audit_trail"] = [
+            *result.get("audit_trail", []),
+            make_audit_event(
+                "retriever",
+                "retriever_retained_chunks",
+                {"retained_chunk_ids": [c["chunk_id"] for c in retained]},
+            ),
+        ]
     result["retrieval_retry_count"] = state.get("retrieval_retry_count", 0) + 1
     # Reset loop_count so the synthesizer gets fresh rewrite attempts.
     result["loop_count"] = 0

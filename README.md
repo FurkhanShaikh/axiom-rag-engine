@@ -111,12 +111,29 @@ Each tier states exactly what the engine checked — no more.
 
 | Tier | Label | What it proves | What it does *not* prove |
 |---|---|---|---|
-| 1 | Authoritative | Quote is verbatim in the source, faithfully represents it, and at least one cited domain is an official government / treaty-org domain (`.gov`, `.mil`, `.int`, or a recognized national government namespace) **or** on the configured primary-source list | That the primary-source list is complete — a genuinely authoritative domain that isn't recognized lands at Tier 3 |
+| 1 | Authoritative | Quote is verbatim in the source, faithfully represents it, and at least one cited page is on an official government / treaty-org domain (`.gov`, `.mil`, `.int`, or a recognized national government namespace) **or** on the configured primary-source list — and is not user-generated content hosted there (forums, mailing-list archives, Q&A, public comments) | That the primary-source list is complete — a genuinely authoritative domain that isn't recognized lands at Tier 3 |
 | 2 | Multi-Domain | Quote is verbatim, faithfully represents the source, and the sentence cites ≥2 distinct domains | **That those domains agree.** This is coverage, not corroboration — the sources are not compared to each other |
-| 3 | Model Assisted | Quote is verbatim and faithfully represents the source | Any authority or cross-source claim |
+| 3 | Model Assisted | Quote is verbatim and faithfully represents the source (or semantic verification is disabled by server policy) | Any authority or cross-source claim |
+| 3 | Unverified (`tier_label: "unverified"`) | Verification did **not** run to completion: the quote is verbatim but the semantic check failed to run (provider error, unparseable verdict, exhausted budget) — or the sentence is uncited, so nothing was checked | That the claim is faithful to its source |
 | 4 | Misrepresented | Quote is verbatim, but the claim distorts what the source says | — |
 | 5 | Hallucinated | Quote was **not found** in the cited chunk | — |
 | 6 | Conflicted | Each citation is verbatim and faithful, but the cited sources **actively contradict each other** on the claim. Opt-in (`AXIOM_CONTRADICTION_DETECTION_ENABLED`); off by default, so never assigned unless enabled | That either source is wrong — only that they disagree |
+
+**Unverified is never silent.** It keeps tier number 3 for client
+compatibility, but carries its own label, scores 0.30 instead of 0.60, and any
+*cited* unverified sentence makes the response `status: "partial"` — a broken
+or overloaded verifier can no longer produce `status: "success"`. Uncited
+(transitional) sentences are allowed, labelled unverified, and excluded from
+the confidence score and the tier breakdown; an answer made *only* of uncited
+sentences is `partial`.
+
+Each passing citation also carries `matched_source_text`: the exact text of the
+source the quote matched (original casing and punctuation), so clients can
+show what the source says rather than the model's rendering of it.
+Normalization forgives formatting only — punctuation becomes a word boundary,
+never a deletion (`1.5` never matches `15`, `-5` never matches `5`), matches
+must align to word boundaries, and a quote needs at least 4 words (or 12
+characters in scripts written without spaces, such as CJK).
 
 Tier 1 and Tier 2 are deterministic judgements about **sources**, computed
 from domain metadata — never inferred by a model. Tiers 3–5 describe the
@@ -293,11 +310,13 @@ axiom-rag-engine audit <request_id> [--url URL] [--api-key KEY] [--json]
 ### Runtime status
 
 `GET /v1/status` returns a JSON snapshot of version, uptime, active policy, and
-configured backends. No secrets are exposed — API keys and Redis URLs are
-reported as booleans.
+configured backends. It requires an API key like the rest of `/v1` (it reveals
+models, limits, and corpus contents); the unauthenticated probes are
+`/health/live` and `/health/ready`. No secrets are exposed — API keys and Redis
+URLs are reported as booleans.
 
 ```bash
-curl http://localhost:8000/v1/status | jq .
+curl -H "X-API-Key: $KEY" http://localhost:8000/v1/status | jq .
 ```
 
 Combine with `axiom-rag-engine check-config` to see every `AXIOM_*` value and
@@ -322,6 +341,10 @@ them:
 2. **Streamed to logs** — set `AXIOM_LOG_AUDIT_EVENTS=true` together with
    `LOG_FORMAT=json` to emit one structured line per audit event, ready to
    forward to a log aggregator.
+
+Retained trails are scoped to the API key that produced them: a caller can
+only list and read its own, and reusing another caller's `request_id` creates a
+separate entry rather than overwriting theirs.
 
 The retention store is process-local and bounded — for durable history, use
 the log stream into your existing aggregator.
@@ -368,8 +391,8 @@ curl -fsS http://localhost:8000/health/live
 # Readiness (engine compiled, keys + backend configured)
 curl -fsS http://localhost:8000/health/ready
 
-# Full operator snapshot
-curl -fsS http://localhost:8000/v1/status | jq .
+# Full operator snapshot (authenticated)
+curl -fsS -H "X-API-Key: $KEY" http://localhost:8000/v1/status | jq .
 ```
 
 ## Development

@@ -48,18 +48,28 @@ def make_final_sentence_dict(
         5: "hallucinated",
         6: "conflicted",
     }
+    verification = {
+        "tier": tier,
+        "tier_label": label_map[tier],
+        "mechanical_check": "passed" if tier != 5 else "failed",
+        "semantic_check": {4: "failed", 5: "skipped"}.get(tier, "passed"),
+        "failure_reason": None,
+    }
+    # A tiered claim is always a cited sentence — uncited sentences are not
+    # claims and are excluded from scoring (see scoring.py).
     return {
         "sentence_id": sentence_id,
         "text": text,
-        "is_cited": False,
-        "citations": [],
-        "verification": {
-            "tier": tier,
-            "tier_label": label_map[tier],
-            "mechanical_check": "passed" if tier != 5 else "failed",
-            "semantic_check": ("passed" if tier not in (4, 5) else "failed"),
-            "failure_reason": None,
-        },
+        "is_cited": True,
+        "citations": [
+            {
+                "citation_id": f"cite_{sentence_id}",
+                "chunk_id": "doc_1_chunk_A",
+                "exact_source_quote": "a verified quote from the source",
+                "verification": verification,
+            }
+        ],
+        "verification": verification,
     }
 
 

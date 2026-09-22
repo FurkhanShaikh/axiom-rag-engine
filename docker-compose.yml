@@ -47,7 +47,8 @@ services:
     volumes:
       - ollama_models:/models
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      # The ollama/ollama image does not guarantee curl; the CLI is always there.
+      test: ["CMD", "ollama", "list"]
       interval: 30s
       timeout: 10s
       retries: 5

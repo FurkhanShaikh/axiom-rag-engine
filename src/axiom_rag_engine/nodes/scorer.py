@@ -20,6 +20,7 @@ import logging
 import re
 from functools import partial
 from typing import Any
+from urllib.parse import urlparse
 
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
@@ -249,6 +250,58 @@ def is_primary_domain(domain: str, primary: set[str]) -> bool:
     if domain_norm in primary:
         return True
     return any(domain_norm.endswith("." + p) for p in primary)
+
+
+# Primary-source domains that also host user-generated content (forums,
+# mailing-list archives, Q&A, public comments). Such pages stay citable — they
+# can still reach Tier 2/3 — but must not inherit Tier 1 from their domain.
+# Matched as the leftmost host label (e.g. users.rust-lang.org, lists.w3.org)...
+_UGC_HOST_LABELS: frozenset[str] = frozenset(
+    {
+        "lists",
+        "mail",
+        "mailarchive",
+        "forum",
+        "forums",
+        "discuss",
+        "discourse",
+        "community",
+        "users",
+        "internals",
+        "answers",
+    }
+)
+# ...or as a whole path segment (learn.microsoft.com/en-us/answers/...,
+# developer.apple.com/forums/..., regulations.gov/comment/...,
+# postgresql.org/message-id/...).
+_UGC_PATH_SEGMENTS: frozenset[str] = frozenset(
+    {"answers", "forums", "forum", "comment", "comments", "message-id", "discussions"}
+)
+
+
+def _is_user_generated(domain_norm: str, url: str) -> bool:
+    """True when the host or path marks a page as user-generated content."""
+    if domain_norm.split(".", 1)[0] in _UGC_HOST_LABELS:
+        return True
+    if not url:
+        return False
+    try:
+        path = urlparse(url).path.lower()
+    except ValueError:
+        return False
+    return any(segment in _UGC_PATH_SEGMENTS for segment in path.split("/"))
+
+
+def is_primary_source(domain: str, url: str, primary: set[str]) -> bool:
+    """Return True when a cited *page* is a primary (Tier-1-eligible) source.
+
+    :func:`is_primary_domain` plus a document-level check: forum, mailing-list,
+    Q&A, and public-comment pages hosted on a primary domain are not primary.
+    ``url`` may be empty, in which case only the host is inspected.
+    """
+    if not is_primary_domain(domain, primary):
+        return False
+    return not _is_user_generated(_normalize_domain(domain), url)
 
 
 def score_source_quality(

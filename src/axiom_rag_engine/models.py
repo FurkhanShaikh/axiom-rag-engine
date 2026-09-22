@@ -79,7 +79,16 @@ class PipelineStagesConfig(BaseModel):
     )
     semantic_verification_enabled: bool = True
     max_ranked_chunks: int = Field(default=10, ge=1, le=50)
-    max_rewrite_loops: int = Field(default=3, ge=1, le=5)
+    max_rewrite_loops: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description=(
+            "Rewrite passes allowed per retrieval round after the initial synthesis "
+            "(each round runs at most max_rewrite_loops + 1 synthesis passes). "
+            "0 disables rewrites."
+        ),
+    )
     max_retrieval_retries: int = Field(
         default=1,
         ge=0,
@@ -185,13 +194,23 @@ class SynthesizerOutput(BaseModel):
 #   1 Authoritative  — mechanical + semantic pass; ≥1 cited domain is on the
 #                      configured primary-source list (government body, official
 #                      spec, platform docs). Tertiary sources (Wikipedia, arXiv)
-#                      cannot reach Tier 1.
+#                      cannot reach Tier 1, nor can user-generated pages hosted
+#                      on a primary domain (forums, list archives, Q&A, public
+#                      comments — see scorer.is_primary_source).
 #   2 Multi-Domain   — mechanical + semantic pass; citations span ≥2 distinct
 #                      domains. This is coverage, NOT corroboration: the sources
 #                      are never compared against each other, so Tier 2 does not
 #                      mean they agree. Cross-source entailment is not
 #                      implemented — do not describe this tier as "consensus".
-#   3 Model Assisted — mechanical pass; semantic check passed or disabled.
+#   3 Model Assisted — mechanical pass; semantic check passed or disabled by
+#                      server policy (tier_label="model_assisted").
+#   3 Unverified     — verification did not run to completion
+#                      (tier_label="unverified"): either the semantic check
+#                      errored (provider error, unparseable verdict, exhausted
+#                      budget) or the sentence carries no citation at all. Kept
+#                      at tier 3 for client compatibility; the label, a lower
+#                      confidence weight, and status="partial" (for cited
+#                      sentences) carry the difference.
 #   4 Misrepresented — mechanical pass; semantic fail (context stripped/inverted).
 #   5 Hallucinated   — mechanical fail (quote does not exist in the cited chunk).
 #   6 Conflicted     — mechanical + semantic pass on each citation, but the cited
@@ -216,6 +235,7 @@ class VerificationResult(BaseModel):
         "consensus",  # Deprecated — use "multi_source" for new code.
         "multi_source",
         "model_assisted",
+        "unverified",
         "misrepresented",
         "hallucinated",
         "conflicted",
@@ -240,6 +260,16 @@ class VerificationResult(BaseModel):
             raise ValueError("Tier 1 and Tier 2 require both checks to pass.")
         if self.tier == 6 and self.semantic_check == "skipped":
             raise ValueError("Tier 6 requires an explicit contradiction verdict.")
+        if self.tier_label == "unverified":
+            if self.tier != 3:
+                raise ValueError("tier_label='unverified' is only valid at tier 3.")
+            if self.mechanical_check == "passed" and self.semantic_check == "passed":
+                raise ValueError("tier_label='unverified' cannot be used when both checks passed.")
+        if self.tier_label == "model_assisted" and self.mechanical_check != "passed":
+            raise ValueError(
+                "tier_label='model_assisted' promises a verbatim quote and requires "
+                "mechanical_check='passed'; use 'unverified' for uncited sentences."
+            )
         return self
 
 
@@ -253,6 +283,14 @@ class CitationSource(BaseModel):
     url: str = ""
     title: str = ""
     domain: str = ""
+    source_label: str = Field(
+        default="",
+        description=(
+            "Operator-supplied provenance for ingested corpus documents (the "
+            "`source` given at ingest: a filename, bucket path, or system id). "
+            "Empty for web results."
+        ),
+    )
 
 
 class VerifiedCitation(Citation):
@@ -264,6 +302,15 @@ class VerifiedCitation(Citation):
         description=(
             "Where the cited chunk came from. None when the chunk_id could not "
             "be resolved (e.g. the citation referenced a nonexistent chunk)."
+        ),
+    )
+    matched_source_text: str | None = Field(
+        default=None,
+        description=(
+            "The exact text of the source chunk that the quote matched during "
+            "mechanical verification (original casing, punctuation, accents). "
+            "Unlike exact_source_quote, which is the model's rendering, this is "
+            "taken from the source. None when mechanical verification failed."
         ),
     )
 

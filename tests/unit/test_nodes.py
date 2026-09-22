@@ -624,6 +624,7 @@ class TestCitationSourceResolution:
             "url": "https://example.com/batteries",
             "title": "",
             "domain": "example.com",
+            "source_label": "",  # web result: no operator-supplied provenance
         }
 
     async def test_unresolvable_chunk_yields_null_source(self) -> None:
@@ -676,11 +677,12 @@ class TestSemanticVerifierStateUpdates:
         assert "loop_count" not in result
 
     @patch("axiom_rag_engine.nodes.semantic.litellm.acompletion", new_callable=AsyncMock)
-    async def test_uncited_transition_sentence_gets_tier_3_no_rewrite(
+    async def test_uncited_transition_sentence_is_unverified_no_rewrite(
         self, mock_comp: AsyncMock
     ) -> None:
         """Uncited transition sentences are allowed by the synthesizer prompt.
-        They are skipped (Tier 3) rather than penalised (Tier 5)."""
+        They are not penalised (Tier 5), but nothing about them was checked, so
+        they are labelled "unverified" rather than "model_assisted"."""
         draft = [
             {
                 "sentence_id": "s_01",
@@ -693,6 +695,7 @@ class TestSemanticVerifierStateUpdates:
         result = await semantic_verifier_node(state)
         vr = result["final_sentences"][0]["verification"]
         assert vr["tier"] == 3
+        assert vr["tier_label"] == "unverified"
         assert vr["mechanical_check"] == "skipped"
         assert vr["semantic_check"] == "skipped"
         assert not result["rewrite_requests"]

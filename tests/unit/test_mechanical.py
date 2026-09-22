@@ -63,13 +63,13 @@ class TestNormalizeText:
         assert result == "hello world"
 
     def test_en_dash_converted(self) -> None:
-        # U+2013 → hyphen → then stripped as punctuation
+        # U+2013 → hyphen → punctuation becomes a word boundary, never a deletion
         result = MechanicalVerifier._normalize_text("state\u2013of\u2013the\u2013art")
-        assert result == "stateoftheart"
+        assert result == "state of the art"
 
     def test_em_dash_converted(self) -> None:
         result = MechanicalVerifier._normalize_text("cutting\u2014edge")
-        assert result == "cuttingedge"
+        assert result == "cutting edge"
 
     def test_zero_width_space_removed(self) -> None:
         result = MechanicalVerifier._normalize_text("hel\u200blo")

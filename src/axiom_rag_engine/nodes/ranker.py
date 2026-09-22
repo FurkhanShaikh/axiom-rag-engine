@@ -16,7 +16,6 @@ import asyncio
 import logging
 import math
 import re
-import time
 from collections import Counter
 from functools import partial
 from typing import Any
@@ -24,6 +23,7 @@ from typing import Any
 from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
+from axiom_rag_engine.utils.text import is_unspaced_char
 
 _audit = partial(make_audit_event, "ranker")
 logger = logging.getLogger("axiom_rag_engine.ranker")
@@ -32,7 +32,10 @@ logger = logging.getLogger("axiom_rag_engine.ranker")
 # Text tokenization for keyword matching
 # ---------------------------------------------------------------------------
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Letters and digits of any script (\w minus underscore). The old ASCII-only
+# pattern dropped Arabic, Cyrillic-with-accents, CJK, ... entirely, so every
+# non-Latin query scored zero relevance.
+_TOKEN_RE = re.compile(r"[^\W_]+")
 
 # Common English stopwords to exclude from relevance scoring.
 _STOPWORDS: set[str] = {
@@ -115,10 +118,36 @@ _STOPWORDS: set[str] = {
 }
 
 
+def _split_by_script(token: str) -> list[tuple[str, bool]]:
+    """Split a token into maximal runs of (spaced | unspaced) script."""
+    runs: list[tuple[str, bool]] = []
+    for ch in token:
+        unspaced = is_unspaced_char(ch)
+        if runs and runs[-1][1] == unspaced:
+            runs[-1] = (runs[-1][0] + ch, unspaced)
+        else:
+            runs.append((ch, unspaced))
+    return runs
+
+
 def _tokenize(text: str) -> list[str]:
-    """Lowercase tokenization with stopword removal."""
-    tokens = _TOKEN_RE.findall(text.lower())
-    return [t for t in tokens if t not in _STOPWORDS]
+    """Lowercase, script-aware tokenization with English stopword removal.
+
+    Spaced scripts yield whole words. Unspaced scripts (CJK, Thai, ...) have no
+    word delimiters, so their runs yield overlapping character bigrams — the
+    standard dictionary-free approach for CJK lexical retrieval.
+    """
+    tokens: list[str] = []
+    for raw in _TOKEN_RE.findall(text.lower()):
+        for run, unspaced in _split_by_script(raw):
+            if unspaced:
+                if len(run) == 1:
+                    tokens.append(run)
+                else:
+                    tokens.extend(run[i : i + 2] for i in range(len(run) - 1))
+            elif run not in _STOPWORDS:
+                tokens.append(run)
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +246,9 @@ def compute_ranking_score(
     """Weighted combination of relevance and quality for final ranking.
 
     Weights are configurable at call-time; defaults match the module constants.
-    Configure via ``pipeline_config.stages.relevance_weight`` and
-    ``pipeline_config.stages.quality_weight``.
+    The ranker node reads ``relevance_weight`` / ``quality_weight`` from the stage
+    config when present — an internal knob (evals, tests), not part of the
+    public PipelineStagesConfig schema, so API callers cannot set it.
     """
     return round(relevance_weight * relevance + quality_weight * quality, 4)
 
@@ -334,19 +364,7 @@ async def _grade_chunk(user_query: str, chunk_text: str, model: str) -> int:
     Uses the shared LLM machinery (budget, semaphore, usage accounting) so
     rerank calls are governed exactly like verifier calls.
     """
-    import litellm
-
-    from axiom_rag_engine.config.observability import (
-        LLM_CALL_DURATION,
-        get_tracer,
-        safe_model_label,
-    )
-    from axiom_rag_engine.utils.llm import (
-        build_completion_kwargs,
-        consume_llm_budget,
-        get_llm_semaphore,
-        record_llm_usage,
-    )
+    from axiom_rag_engine.utils.llm import call_llm
 
     messages = [
         {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
@@ -358,20 +376,9 @@ async def _grade_chunk(user_query: str, chunk_text: str, model: str) -> int:
         },
     ]
     # json_mode=False: we want a bare integer, not a JSON object.
-    kwargs = build_completion_kwargs(model=model, messages=messages, json_mode=False)
-    kwargs["max_tokens"] = _RERANK_MAX_TOKENS
-
-    tracer = get_tracer()
-    with tracer.start_as_current_span("ranker.rerank_call", attributes={"model": model}):
-        start = time.monotonic()
-        consume_llm_budget("reranker")
-        async with get_llm_semaphore():
-            response = await litellm.acompletion(**kwargs)
-        LLM_CALL_DURATION.labels(node="reranker", model=safe_model_label(model)).observe(
-            time.monotonic() - start
-        )
-        record_llm_usage(getattr(response, "usage", None), "reranker", model)
-    raw = response.choices[0].message.content or ""
+    raw = await call_llm(
+        "reranker", model, messages, json_mode=False, max_tokens=_RERANK_MAX_TOKENS
+    )
     return _parse_rerank_grade(raw)
 
 

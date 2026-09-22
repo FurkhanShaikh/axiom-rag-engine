@@ -1,9 +1,16 @@
 """SSE streaming generator for ``POST /v1/synthesize/stream``.
 
 Yields one SSE frame per pipeline event so the caller can show live
-progress while the graph runs.  The verification contract is preserved:
-``sentence`` frames are only emitted after a citation clears both
-mechanical and semantic verification — unverified text never crosses the wire.
+progress while the graph runs. Answer text is withheld until the pipeline
+finishes verifying: ``sentence`` frames are emitted only after the final
+verification pass, each carrying its verification result. That includes
+sentences that did NOT verify (Tier 4/5, or tier_label "unverified") — they are
+labelled, not hidden, exactly as in the non-streaming response. Draft text from
+intermediate passes never crosses the wire.
+
+``loop`` frames are emitted when a rewrite pass or a re-retrieval actually
+starts (not when the verifier merely reports pending failures, which may end
+the run instead).
 
 Event ordering guarantee:
   accepted → stage*(start|complete) / loop* → sentence* → complete | error
@@ -93,6 +100,19 @@ def _apply_node_update(state: dict[str, Any], update: dict[str, Any]) -> None:
             state[key] = value
 
 
+def _loop_reason(node: str, accumulated: dict[str, Any]) -> str | None:
+    """Classify a node start as the beginning of a loop iteration, if it is one.
+
+    A ``synthesizer`` start is a rewrite when the previous verification pass
+    left correction requests; a ``re_retriever`` start is always a re-retrieval.
+    """
+    if node == "re_retriever":
+        return "re_retrieve"
+    if node == "synthesizer" and accumulated.get("rewrite_requests"):
+        return "rewrite"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------------------------
@@ -138,8 +158,6 @@ async def stream_pipeline(
 
     # -- live pipeline --
     node_start_times: dict[str, float] = {}
-    last_loop_count = 0
-    last_retry_count = 0
 
     # Accumulate state updates so we can build the final result without a
     # second ainvoke call.
@@ -185,6 +203,21 @@ async def stream_pipeline(
 
             if evt_type == "on_chain_start":
                 node_start_times[name] = time.monotonic()
+                loop_reason = _loop_reason(name, accumulated)
+                if loop_reason is not None:
+                    retry = int(accumulated.get("retrieval_retry_count") or 0)
+                    yield _sse(
+                        "loop",
+                        {
+                            "type": "loop",
+                            "loop_count": int(accumulated.get("loop_count") or 0),
+                            "retrieval_retry_count": retry + 1
+                            if loop_reason == "re_retrieve"
+                            else retry,
+                            "reason": loop_reason,
+                        },
+                        _next_id(),
+                    )
                 yield _sse(
                     "stage",
                     {
@@ -230,37 +263,6 @@ async def stream_pipeline(
                     },
                     _next_id(),
                 )
-
-                # Emit loop events from verifier output so the UI can show
-                # "rewriting..." or "fetching more sources..." badges.
-                if name == "verifier" and isinstance(output, dict):
-                    new_loop = int(output.get("loop_count") or 0)
-                    new_retry = int(output.get("retrieval_retry_count") or 0)
-                    pending = int(output.get("pending_rewrite_count") or 0)
-                    if pending > 0 and new_loop > last_loop_count:
-                        yield _sse(
-                            "loop",
-                            {
-                                "type": "loop",
-                                "loop_count": new_loop,
-                                "retrieval_retry_count": new_retry,
-                                "reason": "rewrite",
-                            },
-                            _next_id(),
-                        )
-                        last_loop_count = new_loop
-                    elif pending > 0 and new_retry > last_retry_count:
-                        yield _sse(
-                            "loop",
-                            {
-                                "type": "loop",
-                                "loop_count": new_loop,
-                                "retrieval_retry_count": new_retry,
-                                "reason": "re_retrieve",
-                            },
-                            _next_id(),
-                        )
-                        last_retry_count = new_retry
 
     except LLMBudgetExceededError as exc:
         yield _sse(

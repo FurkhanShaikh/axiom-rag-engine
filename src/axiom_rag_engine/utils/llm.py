@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import json
+import re
+import time
 from typing import Any
 
 from axiom_rag_engine.config.settings import get_settings
@@ -262,3 +265,123 @@ def build_completion_kwargs(
         kwargs["response_format"] = {"type": "json_object"}
 
     return kwargs
+
+
+# ---------------------------------------------------------------------------
+# The single LLM call path
+# ---------------------------------------------------------------------------
+
+
+async def call_llm(
+    node: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float = 0.0,
+    json_mode: bool = True,
+    max_tokens: int | None = None,
+) -> str:
+    """Issue one chat completion under the shared call policy; return its text.
+
+    Every LLM call in the pipeline goes through here so the policy is uniform:
+      - the per-request call budget is consumed *before* the provider is hit
+        (``LLMBudgetExceededError`` propagates unwrapped — callers decide whether
+        to degrade or abort, and the endpoint maps it to HTTP 429);
+      - the global concurrency semaphore bounds in-flight calls;
+      - duration, tokens, and cost are recorded under ``node``;
+      - provider quirks come from :func:`build_completion_kwargs`.
+
+    Provider errors propagate unchanged. ``None`` content becomes ``""``.
+    """
+    import litellm
+
+    from axiom_rag_engine.config.observability import (
+        LLM_CALL_DURATION,
+        get_tracer,
+        safe_model_label,
+    )
+
+    kwargs = build_completion_kwargs(
+        model=model, messages=messages, temperature=temperature, json_mode=json_mode
+    )
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+
+    with get_tracer().start_as_current_span(f"{node}.llm_call", attributes={"model": model}):
+        consume_llm_budget(node)
+        start = time.monotonic()
+        async with get_llm_semaphore():
+            response = await litellm.acompletion(**kwargs)
+        LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
+            time.monotonic() - start
+        )
+        record_llm_usage(getattr(response, "usage", None), node, model)
+    return str(response.choices[0].message.content or "")
+
+
+# Caps the O(n) salvage scan so a runaway or adversarial response cannot burn
+# CPU before we give up.
+_MAX_JSON_SEARCH_CHARS = 200_000
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_LEADING_FENCE_RE = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_TRAILING_FENCE_RE = re.compile(r"\s*```$")
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    """Quote-aware balanced-brace scan for the first ``{...}`` block."""
+    if len(text) > _MAX_JSON_SEARCH_CHARS:
+        return None
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\" and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start != -1:
+                return text[start : i + 1]
+    return None
+
+
+def parse_json_object(raw: str) -> dict[str, Any]:
+    """Parse an LLM reply that should be a single JSON object.
+
+    Tolerates the common failure shapes: ``<think>`` blocks (Qwen-family),
+    markdown fences, and prose around the object (balanced-brace salvage).
+    Raises ``ValueError`` when no JSON object can be recovered.
+    """
+    clean = _THINK_BLOCK_RE.sub("", raw.strip())
+    clean = _LEADING_FENCE_RE.sub("", clean.strip())
+    clean = _TRAILING_FENCE_RE.sub("", clean.strip())
+    if len(clean) > _MAX_JSON_SEARCH_CHARS:
+        raise ValueError("LLM response is not valid JSON: response too large to parse.")
+
+    try:
+        data = json.loads(clean)
+    except json.JSONDecodeError as first_err:
+        salvaged = _extract_first_json_object(clean)
+        if salvaged is None:
+            raise ValueError(f"LLM response is not valid JSON: {first_err}") from first_err
+        try:
+            data = json.loads(salvaged)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"LLM response is not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"LLM response must be a JSON object, got {type(data).__name__}.")
+    return data

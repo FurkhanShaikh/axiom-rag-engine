@@ -100,3 +100,17 @@ async def embed_query(model: str, query: str) -> list[float]:
     _, query_prefix = embed_prefixes(model)
     response = await litellm.aembedding(**_embedding_kwargs(model, [query_prefix + query]))
     return _l2_normalize(list(response["data"][0]["embedding"]))
+
+
+def embed_query_sync(model: str, query: str) -> list[float]:
+    """Synchronous :func:`embed_query` for code already running off the event loop.
+
+    The corpus backend runs inside ``asyncio.to_thread`` worker threads. Driving
+    the async embedder there with ``asyncio.run`` spins up a throwaway loop per
+    call and leaves LiteLLM's cached aiohttp sessions and logging tasks bound to
+    dead loops ("attached to a different loop"). The sync client has no loop
+    affinity.
+    """
+    _, query_prefix = embed_prefixes(model)
+    response = litellm.embedding(**_embedding_kwargs(model, [query_prefix + query]))
+    return _l2_normalize(list(response["data"][0]["embedding"]))

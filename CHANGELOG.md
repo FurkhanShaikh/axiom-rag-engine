@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — verification honesty (breaking for clients that assumed every Tier 3 was checked)
+- **New `tier_label: "unverified"` (tier 3).** A cited sentence whose semantic check could not run — provider error, unparseable verifier output, exhausted LLM budget — was silently reported as Tier 3 "model_assisted" with `status: "success"`, identical to a verified answer. It is now labelled `unverified`, scores 0.30 (vs 0.60), and makes the response `status: "partial"`. Enforced by `VerificationResult`'s validator: `model_assisted` now requires a mechanical pass.
+- **Uncited sentences are `unverified`, not Tier 3 "model_assisted".** They remain allowed (transitional text) but are excluded from the confidence score, the tier breakdown, and the success decision; an answer with no cited sentence is `partial`.
+- **Mechanical verifier no longer deletes punctuation.** Punctuation and symbols become word boundaries, a minus sign before a number is kept, matches must align to word boundaries in spaced scripts, and the 12-character minimum applies only to unspaced scripts (CJK, Thai, …). Previously `"rose 1.5 percent"` matched a source saying `"rose 15 percent"`, `"5 degrees"` matched `"-5 degrees"`, and a single long word (`"cardiovascular"`) counted as a quote.
+- **`max_rewrite_loops` now counts rewrites.** It used to count synthesis passes, so `max_rewrite_loops=1` meant no rewrite at all. The default moved from 3 to 2 so default LLM cost is unchanged (still 3 synthesis passes per retrieval round); `0` now disables rewrites. Callers who set it explicitly get one more rewrite pass than before.
+- **Pre-LLM answerability gate requires lexical overlap.** Chunk quality alone cleared the old `ranking_score` floor, so the gate only fired on empty retrieval. It now also requires at least one chunk to share a query term (waived when hybrid retrieval ran).
+- **BM25 tokenizer is Unicode-aware.** Arabic, accented Latin, and other scripts are tokenized; CJK/Thai runs become character bigrams. Previously every non-Latin query scored zero relevance. SciFact BM25 metrics are unchanged.
+- **Tier 1 is judged per page.** Forum, mailing-list, Q&A, and public-comment pages hosted on primary domains (`users.rust-lang.org`, `lists.w3.org`, `learn.microsoft.com/…/answers/`, `regulations.gov/comment/…`) no longer inherit Tier 1.
+- **`GET /v1/status` requires an API key.** Health probes remain open.
+
+### Fixed
+- **Audit trails leaked across tenants.** Any API key could list, read, and overwrite (via a reused `request_id`) another key's audit trails. Trails are now scoped to the producing key.
+- **Budget exhaustion returned HTTP 500 instead of 429.** The synthesizer wrapped `LLMBudgetExceededError` in a `RuntimeError`.
+- **Rewrite passes were blind.** The correction list referenced sentence/citation IDs from a draft the model never saw; the previous draft is now included. When every retry is exhausted, the best pass seen is returned instead of the last one (audited as `best_pass_selected`).
+- **Streaming loop events.** The `re_retrieve` loop event could never fire, and `rewrite` fired even when a failed pass ended the run. Events are now emitted when the rewrite / re-retrieval actually starts. The SSE docs no longer claim unverified text never reaches the client — failed sentences are streamed, labelled, exactly as in the JSON response.
+- **Chunk cap was first-come.** One long page could consume the whole per-request cap (and overshoot it). The cap is now shared round-robin across documents.
+- **Retrieval retries discarded the best sources.** A retry now keeps the previous round's top-ranked chunks alongside fresh results.
+- **Startup refused explicitly configured models** (e.g. `gemini/…`, `bedrock/…`) unless an Anthropic/OpenAI key or Ollama was present. Setting both `AXIOM_DEFAULT_*_MODEL` now suffices.
+- **Corpus provenance.** The ingest `source` label now reaches citations (`CitationSource.source_label`).
+- Document-ingest 502 responses no longer echo backend error text; upload form fields are length-limited like the JSON endpoint.
+- PDF/HTML extraction, chunking, and corpus SQLite calls no longer block the event loop; corpus query embedding uses LiteLLM's sync client instead of `asyncio.run` in worker threads (which left aiohttp sessions bound to dead loops).
+- `docker-compose` Ollama healthcheck uses `ollama list` instead of `curl`.
+
+### Internal
+- One LLM call path (`utils.llm.call_llm`) and one JSON parser (`parse_json_object`) replace five copies of budget/semaphore/usage/salvage logic.
+- Contradiction and corroboration gates run concurrently across sentences.
+- Removed dead code (`_build_uncited_sentence_request`, `run_with_otel_context`).
+- Contract tests pin the README tier table, mechanical-verifier integrity cases, verifier fault injection, and tenant isolation.
+
 ### Added
 - **Second-stage reranking (opt-in).** Set `AXIOM_RERANKER_MODEL` (a LiteLLM chat model) to add an LLM reranker that regrades the top `AXIOM_RERANK_TOP_K` candidates (query + passage judged together) and reorders by relevance — after BM25/hybrid and before the trim, so a strong chunk the base ranker buried below the cutoff can still reach the answer. A refinement, not a reshuffle: equal grades keep the base order, `ranking_score` is untouched, each reranked chunk gets a `rerank_grade`, and `ranker_complete` reports `ranking_mode` as `…+rerank`. Off by default; **fails open** (a grading error sinks that candidate; a total failure keeps the base order). Adds up to `AXIOM_RERANK_TOP_K` LLM calls per request — pick a fast model. Measured lift (nDCG@10 +~0.10, recall@1 +~0.13 over BM25) and the harness (`retrieval_eval.py --method rerank`) are in `BENCHMARKS.md`. `GET /v1/status` reports the reranker.
 - **Tier 6 (Conflicted) — cross-source contradiction detection (opt-in).** `AXIOM_CONTRADICTION_DETECTION_ENABLED=true` makes a multi-domain sentence whose cited sources *actively contradict each other* (opposite conclusions, incompatible figures) resolve to Tier 6 instead of a confident Tier 1/2 — surfacing disagreement rather than hiding it. An extra verifier check over the distinct-domain quotes runs first and overrides Tier 1/2 (a conflict short-circuits the corroboration gate). Fails safe: a check error keeps the original tier rather than asserting a conflict it could not verify. Default false keeps Tier 6 unassigned. Audited as `contradiction_result` / `contradiction_error`. This completes the 6-tier taxonomy — Tier 6 was previously reserved in the schema but never assigned.

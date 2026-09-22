@@ -101,7 +101,10 @@ def strip_html(raw: str) -> str:
 _MIN_CHUNK_LENGTH = 40  # Skip trivially short paragraphs (nav bars, footers)
 _MAX_CHUNK_LENGTH = 1500  # Prevent unbounded context overflow
 _OVERLAP_SENTENCES = 1  # Sentences carried forward to bridge chunk boundaries
-_MAX_CHUNKS_PER_REQUEST = 200  # Hard cap — configurable via app_config
+# Hard cap on chunks per retrieval pass, shared round-robin across documents.
+# Internal knob (app_config['max_chunks_per_request']); not part of the public
+# AppConfig schema.
+_MAX_CHUNKS_PER_REQUEST = 200
 
 # Module-level segmenter; pySBD is stateless so this is safe for concurrent use.
 _SEGMENTER = pysbd.Segmenter(language="en", clean=False)
@@ -232,9 +235,12 @@ def generate_search_queries(
     query plus simple reformulations.
 
     On re-retrieval after a failed rewrite loop (rewrite_requests is non-empty),
-    the failure context is injected as targeted search terms so the fresh
-    retrieval is more likely to surface chunks that can fix the specific
-    verification failures rather than returning the same results again (C5 fix).
+    generic reformulations ("<query> details", "<query> evidence facts") are
+    used to pull different results; URLs already seen are skipped by the
+    retriever, and the retry node (graph.retriever_with_retry) keeps the previous
+    round's best chunks alongside the fresh ones. The failure context itself is
+    deliberately NOT put into the search query (it would leak internal verifier
+    text to the search provider).
     """
     queries = [user_query]
     lower = user_query.lower().strip()
@@ -427,7 +433,6 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
     total_duplicate_chunks = 0
     failed_queries = 0
     snippet_only_docs = 0
-    cap_hit = False
 
     # On re-retrieval, seed seen_urls with URLs already mapped globally from past cycles.
     past_urls: list[str] = list(state.get("past_seen_urls") or [])
@@ -442,9 +447,9 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
     with tracer.start_as_current_span("retriever.search", attributes={"query_count": len(queries)}):
         search_outcomes = list(await asyncio.gather(*[_safe_search(q) for q in queries]))
 
+    # Phase 1: collect every document's candidate chunks (IDs, dedup, audit).
+    per_doc: list[list[dict[str, Any]]] = []
     for query, results, exc in search_outcomes:
-        if cap_hit:
-            break
         if exc is not None:
             failed_queries += 1
             audit.append(
@@ -456,8 +461,6 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
             continue
 
         for result in results:
-            if cap_hit:
-                break
             url: str = result.get("url", "")
             total_results += 1
 
@@ -516,6 +519,10 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
 
             paragraphs = chunk_into_paragraphs(clean_text)
             title: str = result.get("title", "")
+            # Provenance label from the backend (corpus documents carry the
+            # operator-supplied source, e.g. a filename or bucket path).
+            source_label = str(result.get("source") or "")
+            doc_chunks: list[dict[str, Any]] = []
 
             if not paragraphs:
                 audit.append(_audit("retriever_no_chunks", {"url": url}))
@@ -531,32 +538,49 @@ async def retriever_node(state: GraphState) -> dict[str, Any]:
                 seen_chunk_hashes.add(h)
 
                 chunk_id = f"doc_{doc_counter}_chunk_{_chunk_label(chunk_idx)}"
-                indexed_chunks.append(
-                    {
-                        "chunk_id": chunk_id,
-                        "text": paragraph,
-                        "source_url": url,
-                        "domain": extract_domain(url),
-                        "title": title,
-                        "doc_index": doc_counter,
-                        "chunk_index": chunk_idx,
-                        # Whether this chunk came from the full page or a search
-                        # snippet — the verifier's Tier 5 verdicts are only as
-                        # trustworthy as the text they were checked against.
-                        "content_mode": content_mode,
-                    }
-                )
+                chunk: dict[str, Any] = {
+                    "chunk_id": chunk_id,
+                    "text": paragraph,
+                    "source_url": url,
+                    "domain": extract_domain(url),
+                    "title": title,
+                    "doc_index": doc_counter,
+                    "chunk_index": chunk_idx,
+                    # Whether this chunk came from the full page or a search
+                    # snippet — the verifier's Tier 5 verdicts are only as
+                    # trustworthy as the text they were checked against.
+                    "content_mode": content_mode,
+                }
+                if source_label:
+                    chunk["source_label"] = source_label
+                doc_chunks.append(chunk)
 
             doc_counter += 1
-            if len(indexed_chunks) >= max_chunks:
-                cap_hit = True
-                audit.append(
-                    _audit(
-                        "retriever_chunk_cap_reached",
-                        {"cap": max_chunks, "total_chunks": len(indexed_chunks)},
-                    )
-                )
-                break
+            per_doc.append(doc_chunks)
+
+    # Phase 2: apply the cap round-robin across documents — each document's
+    # earliest chunks first — so one long page can never crowd out the rest.
+    candidate_total = sum(len(chunks) for chunks in per_doc)
+    selected: list[dict[str, Any]] = []
+    depth = 0
+    while len(selected) < max_chunks and any(depth < len(chunks) for chunks in per_doc):
+        for chunks in per_doc:
+            if depth < len(chunks) and len(selected) < max_chunks:
+                selected.append(chunks[depth])
+        depth += 1
+    selected.sort(key=lambda c: (c["doc_index"], c["chunk_index"]))
+    indexed_chunks.extend(selected)
+    if candidate_total > max_chunks:
+        audit.append(
+            _audit(
+                "retriever_chunk_cap_reached",
+                {
+                    "cap": max_chunks,
+                    "candidate_chunks": candidate_total,
+                    "documents": len(per_doc),
+                },
+            )
+        )
 
     audit.append(
         _audit(

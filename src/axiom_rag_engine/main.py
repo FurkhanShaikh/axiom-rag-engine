@@ -17,6 +17,7 @@ Extracted modules:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import hashlib
@@ -195,6 +196,17 @@ def _resolve_llm_defaults(
 
         return configured
 
+    if operator_set_synth and operator_set_verif:
+        # The operator chose both models explicitly (e.g. gemini/..., bedrock/...,
+        # openrouter/...). We cannot detect every LiteLLM provider, so trust the
+        # choice; a wrong key surfaces on the first request.
+        logger.info(
+            "Models operator-configured: synthesizer=%s verifier=%s",
+            configured_synth,
+            configured_verif,
+        )
+        return configured_synth, configured_verif
+
     if not has_anthropic and not has_openai and not has_ollama:
         # Only fail-closed in production. In dev/test envs we fall back to the
         # configured defaults so the app can boot without provider credentials —
@@ -205,7 +217,8 @@ def _resolve_llm_defaults(
                 "  • ANTHROPIC_API_KEY  (recommended for production)\n"
                 "  • OPENAI_API_KEY\n"
                 f"  • Ollama running at {settings.ollama_api_base} with at least one model pulled\n"
-                "Or set AXIOM_DEFAULT_SYNTHESIZER_MODEL / AXIOM_DEFAULT_VERIFIER_MODEL explicitly."
+                "Or set BOTH AXIOM_DEFAULT_SYNTHESIZER_MODEL and AXIOM_DEFAULT_VERIFIER_MODEL "
+                "to models your environment can reach."
             )
         logger.warning(
             "No LLM provider detected; using configured defaults (synth=%s, verif=%s). "
@@ -511,6 +524,17 @@ def _cache_key(
     # are impossible even if the hashed body happens to match.
     body_hash = hashlib.sha256(raw.encode()).hexdigest()
     return f"{key_namespace}:{body_hash}"
+
+
+def _audit_owner(api_key: str | None) -> str:
+    """Tenant identity for audit retention: a hash of the caller's API key.
+
+    ``""`` when auth is disabled (development) — a single shared namespace. The
+    raw key never enters the store.
+    """
+    if not api_key:
+        return ""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:32]
 
 
 def _response_to_cache_value(response: AxiomResponse) -> dict[str, Any]:
@@ -876,6 +900,7 @@ async def synthesize(
         response.status,
         graph_result,
         usage_snapshot=response.usage.model_dump() if response.usage else None,
+        owner=_audit_owner(_api_key),
     )
 
     # Cache successful and partial responses only — not errors or unanswerable.
@@ -899,8 +924,10 @@ async def synthesize_stream(
 
     Same request body as ``POST /v1/synthesize``.  Emits one SSE frame per
     pipeline stage plus a ``complete`` frame carrying the full AxiomResponse.
-    Sentences appear in ``sentence`` frames only **after** they clear
-    verification — unverified text never reaches the client.
+    Sentences appear in ``sentence`` frames only after the final verification
+    pass, each with its verification result — including sentences that failed
+    or could not be verified, which are labelled (as in the JSON response), not
+    hidden. Draft text from intermediate passes never reaches the client.
 
     Disconnect behavior: if the client drops mid-stream the pipeline is
     cancelled — in-flight LLM calls are unwound and no further budget is
@@ -945,6 +972,7 @@ async def synthesize_stream(
             response.status,
             graph_result,
             usage_snapshot=response.usage.model_dump() if response.usage else None,
+            owner=_audit_owner(_api_key),
         )
         if response.status in ("success", "partial"):
             _set_cached(key, response)
@@ -976,8 +1004,12 @@ def _persist_and_emit_audit(
     status: str,
     graph_result: dict[str, Any],
     usage_snapshot: dict[str, Any] | None = None,
+    owner: str = "",
 ) -> None:
     """Push the audit trail into the in-memory store and (optionally) logs.
+
+    Entries are stored under ``owner`` (see ``_audit_owner``) so one tenant can
+    never read or overwrite another tenant's trail.
 
     Both operations are best-effort: a retrieval failure on the operator side
     must never poison the response path.
@@ -1008,6 +1040,7 @@ def _persist_and_emit_audit(
                 "recorded_at": time.time(),
                 "audit_trail": audit_trail,
             },
+            owner=owner,
         )
 
     if settings.log_audit_events and audit_trail:
@@ -1030,9 +1063,10 @@ async def list_audits(
     request: Request,
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
-    """Return all request IDs currently held in the audit retention store.
+    """Return the caller's request IDs currently held in the audit store.
 
-    Useful for browsing recent requests before fetching a specific trail.
+    Useful for browsing recent requests before fetching a specific trail. Only
+    trails produced with the caller's own API key are listed.
     Returns an empty list (not 404) when retention is disabled so UI clients
     can treat the response uniformly.
     """
@@ -1043,7 +1077,11 @@ async def list_audits(
             "retention_enabled": enabled,
             "capacity": store.capacity if store is not None else 0,
             "retained": len(store) if store is not None else 0,
-            "request_ids": store.list_ids() if (enabled and store is not None) else [],
+            "request_ids": (
+                store.list_ids(owner=_audit_owner(_api_key))
+                if (enabled and store is not None)
+                else []
+            ),
         }
     )
 
@@ -1057,9 +1095,10 @@ async def get_audit(
     request: Request,
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
-    """Return the retained audit trail for ``request_id`` or 404 if missing.
+    """Return the caller's retained audit trail for ``request_id`` or 404.
 
-    Retention is process-local and bounded by ``AXIOM_AUDIT_RETENTION``.
+    Retention is process-local and bounded by ``AXIOM_AUDIT_RETENTION``. Another
+    tenant's trail is indistinguishable from a missing one (404).
     """
     store: AuditStore | None = getattr(request.app.state, "audit_store", None)
     if store is None or not store.enabled:
@@ -1072,7 +1111,7 @@ async def get_audit(
                 )
             },
         )
-    entry = store.get(request_id)
+    entry = store.get(request_id, owner=_audit_owner(_api_key))
     if entry is None:
         return JSONResponse(
             status_code=404,
@@ -1122,7 +1161,7 @@ def _require_embedding_model() -> str:
     return model
 
 
-def _extract_text_or_422(
+async def _extract_text_or_422(
     data: str | bytes,
     *,
     filename: str | None = None,
@@ -1132,9 +1171,13 @@ def _extract_text_or_422(
 
     ``extract_text`` runs before the ingest try/except, so its IngestionError
     (e.g. a corrupt or encrypted PDF) would otherwise escape to the 500 handler.
+    Parsing (pypdf, trafilatura) is CPU-bound, so it runs in a worker thread
+    rather than stalling every other request on the event loop.
     """
     try:
-        return extract_text(data, filename=filename, content_type=content_type)
+        return await asyncio.to_thread(
+            extract_text, data, filename=filename, content_type=content_type
+        )
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1164,8 +1207,13 @@ async def _ingest_and_respond(
     except IngestionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # embedding backend failure, etc.
+        # Full detail goes to the server log only: provider errors can carry
+        # keys, internal URLs, or account details.
         logger.exception("Document ingestion failed for %s", doc_id)
-        raise HTTPException(status_code=502, detail=f"Ingestion backend error: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ingestion backend error ({type(exc).__name__}) — see server logs.",
+        ) from exc
     return JSONResponse(status_code=201, content=_meta_to_response(meta).model_dump())
 
 
@@ -1183,7 +1231,7 @@ async def ingest_document(
     return await _ingest_and_respond(
         store,
         doc_id=doc_id,
-        text=_extract_text_or_422(payload.text),
+        text=await _extract_text_or_422(payload.text),
         embedding_model=model,
         title=payload.title,
         source=payload.source,
@@ -1194,9 +1242,9 @@ async def ingest_document(
 async def upload_document(
     request: Request,
     file: UploadFile = File(...),
-    title: str = Form(""),
-    source: str = Form(""),
-    doc_id: str | None = Form(None),
+    title: str = Form("", max_length=500),
+    source: str = Form("", max_length=2000),
+    doc_id: str | None = Form(None, max_length=200),
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
     """Ingest an uploaded file (text / markdown / HTML). The filename becomes the
@@ -1204,7 +1252,7 @@ async def upload_document(
     store = _get_corpus_store(request)
     model = _require_embedding_model()
     data = await file.read()
-    text = _extract_text_or_422(data, filename=file.filename, content_type=file.content_type)
+    text = await _extract_text_or_422(data, filename=file.filename, content_type=file.content_type)
     return await _ingest_and_respond(
         store,
         doc_id=doc_id or uuid.uuid4().hex,
@@ -1225,9 +1273,10 @@ async def list_documents(
     _api_key: str | None = Depends(verify_api_key),
 ) -> DocumentListResponse:
     store = _get_corpus_store(request)
-    stats = store.stats()
+    stats = await asyncio.to_thread(store.stats)
+    documents = await asyncio.to_thread(store.list_documents)
     return DocumentListResponse(
-        documents=[_meta_to_response(m) for m in store.list_documents()],
+        documents=[_meta_to_response(m) for m in documents],
         total_documents=stats.documents,
         total_chunks=stats.chunks,
         embedding_models=stats.embedding_models,
@@ -1245,7 +1294,7 @@ async def get_document(
     _api_key: str | None = Depends(verify_api_key),
 ) -> DocumentResponse:
     store = _get_corpus_store(request)
-    meta = store.get_document(doc_id)
+    meta = await asyncio.to_thread(store.get_document, doc_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
     return _meta_to_response(meta)
@@ -1258,7 +1307,7 @@ async def delete_document(
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
     store = _get_corpus_store(request)
-    if not store.delete_document(doc_id):
+    if not await asyncio.to_thread(store.delete_document, doc_id):
         raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
     return JSONResponse(content={"deleted": True, "doc_id": doc_id})
 
@@ -1270,10 +1319,15 @@ async def delete_document(
 
 @app.get("/v1/status", summary="Operator-oriented runtime status snapshot.")
 @limiter.exempt
-async def get_status(request: Request) -> dict[str, Any]:
+async def get_status(
+    request: Request,
+    _api_key: str | None = Depends(verify_api_key),
+) -> dict[str, Any]:
     """Summarise the process: version, uptime, policy, and configured backends.
 
-    Intended for ops dashboards and smoke tests. Does not expose secrets —
+    Intended for ops dashboards and smoke tests. Authenticated like the rest of
+    ``/v1`` (it reveals models, limits, and corpus contents); the unauthenticated
+    probes are ``/health/live`` and ``/health/ready``. Does not expose secrets —
     API keys and Redis URLs are reported as booleans only.
     """
     settings = get_settings()
@@ -1281,6 +1335,12 @@ async def get_status(request: Request) -> dict[str, Any]:
     started_at = getattr(state, "started_at", None)
     uptime = (time.time() - started_at) if started_at else 0.0
     store: AuditStore | None = getattr(state, "audit_store", None)
+    corpus_store: CorpusStore | None = getattr(state, "corpus_store", None)
+    corpus_stats = (
+        (await asyncio.to_thread(corpus_store.stats)).as_dict()
+        if corpus_store is not None
+        else None
+    )
 
     return {
         "service": "axiom-rag-engine",
@@ -1325,11 +1385,7 @@ async def get_status(request: Request) -> dict[str, Any]:
             "reranker_model": settings.reranker_model,
             "rerank_top_k": settings.rerank_top_k if settings.reranker_model else None,
             "source": settings.retrieval_source,
-            "corpus": (
-                state.corpus_store.stats().as_dict()
-                if getattr(state, "corpus_store", None) is not None
-                else None
-            ),
+            "corpus": corpus_stats,
         },
         "observability": {
             "log_format": settings.log_format,

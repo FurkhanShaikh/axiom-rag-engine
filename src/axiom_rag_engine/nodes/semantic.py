@@ -13,7 +13,10 @@ Responsibilities:
         AXIOM_CORROBORATION_ENABLED is set, a Tier-2 candidate is kept only if an
         LLM check confirms ≥2 sources independently corroborate the claim;
         otherwise it drops to Tier 3.
-      * Tier 3: mechanically valid but no authority / no confirmed corroboration.
+      * Tier 3: mechanically valid but no authority / no confirmed corroboration
+        (tier_label "model_assisted"), or verification that did not run to
+        completion — semantic check errored, or the sentence is uncited
+        (tier_label "unverified"; see scoring.determine_status).
       * Tier 4: semantic misrepresentation.
       * Tier 5: mechanical failure (quote not verbatim in the cited chunk).
       * Tier 6: assigned only when AXIOM_CONTRADICTION_DETECTION_ENABLED is set
@@ -27,18 +30,13 @@ import asyncio
 import json
 import logging
 import re
-import time
+from collections.abc import Awaitable
 from functools import partial
 from typing import Any
 
-import litellm
+import litellm  # noqa: F401 — module attribute kept so tests can patch litellm.acompletion here
 
-from axiom_rag_engine.config.observability import (
-    LLM_CALL_DURATION,
-    SEMANTIC_DEGRADATIONS,
-    get_tracer,
-    safe_model_label,
-)
+from axiom_rag_engine.config.observability import SEMANTIC_DEGRADATIONS
 from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.models import (
     Citation,
@@ -47,15 +45,10 @@ from axiom_rag_engine.models import (
     VerificationResult,
     VerifiedCitation,
 )
-from axiom_rag_engine.nodes.scorer import build_primary_domain_set, is_primary_domain
+from axiom_rag_engine.nodes.scorer import build_primary_domain_set, is_primary_source
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import make_audit_event
-from axiom_rag_engine.utils.llm import (
-    build_completion_kwargs,
-    consume_llm_budget,
-    get_llm_semaphore,
-    record_llm_usage,
-)
+from axiom_rag_engine.utils.llm import call_llm, parse_json_object
 
 _audit = partial(make_audit_event, "semantic_verifier")
 logger = logging.getLogger("axiom_rag_engine.semantic_verifier")
@@ -136,71 +129,13 @@ def _sanitize_untrusted(raw: str) -> str:
     return text
 
 
-# Maximum number of characters scanned by the salvage JSON parser.
-# Caps O(n) work so a runaway or adversarially large LLM response cannot
-# exhaust CPU/memory before we give up and raise ValueError.
-_MAX_JSON_SEARCH_CHARS = 200_000
-
-
-def _extract_first_json_object(text: str) -> str | None:
-    """Quote-aware balanced-brace salvage for tolerant JSON recovery.
-
-    Returns None immediately if ``text`` exceeds ``_MAX_JSON_SEARCH_CHARS``
-    to prevent O(n) denial-of-service on pathologically large responses.
-    """
-    if len(text) > _MAX_JSON_SEARCH_CHARS:
-        return None
-    depth = 0
-    start = -1
-    in_str = False
-    esc = False
-    for i, ch in enumerate(text):
-        if esc:
-            esc = False
-            continue
-        if ch == "\\" and in_str:
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start != -1:
-                return text[start : i + 1]
-    return None
-
-
 def _parse_semantic_response(raw: str) -> dict[str, Any]:
     """
     Parse and validate the semantic verifier's JSON response.
-    Strips accidental markdown fences and falls back to balanced-brace salvage
-    when the body contains prose around the JSON block.
-    Raises ValueError on parse or schema errors.
+    Fences, ``<think>`` blocks and surrounding prose are tolerated (see
+    ``utils.llm.parse_json_object``). Raises ValueError on parse or schema errors.
     """
-    clean = re.sub(r"<think>.*?</think>", "", raw.strip(), flags=re.DOTALL)
-    clean = re.sub(r"^```(?:json)?\s*", "", clean.strip(), flags=re.IGNORECASE)
-    clean = re.sub(r"\s*```$", "", clean.strip())
-
-    data: dict[str, Any]
-    try:
-        data = json.loads(clean)
-    except json.JSONDecodeError as first_err:
-        salvaged = _extract_first_json_object(clean)
-        if salvaged is None:
-            raise ValueError(
-                f"Semantic verifier response is not valid JSON: {first_err}"
-            ) from first_err
-        try:
-            data = json.loads(salvaged)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Semantic verifier response is not valid JSON: {exc}") from exc
+    data = parse_json_object(raw)
 
     if "tier" in data:
         raise ValueError("Semantic verifier response must not include a tier field")
@@ -276,13 +211,7 @@ def _resolve_citation_source(
         url=str(chunk_data.get("source_url", "") or ""),
         title=str(chunk_data.get("title", "") or ""),
         domain=str(chunk_data.get("domain", "") or ""),
-    )
-
-
-def _build_uncited_sentence_request(sentence_id: str) -> str:
-    return (
-        f"Sentence {sentence_id}: unsupported sentence — every answer sentence "
-        "must include at least one citation with an exact source quote."
+        source_label=str(chunk_data.get("source_label", "") or ""),
     )
 
 
@@ -297,7 +226,24 @@ def _semantic_disabled_verification(reason: str) -> VerificationResult:
     )
 
 
-def _passed_verification(domain: str, primary: set[str]) -> VerificationResult:
+def _unverified(mechanical_check: str, reason: str) -> VerificationResult:
+    """Tier 3 labelled ``unverified``: verification did not run to completion.
+
+    Used when the semantic check errored (provider error, unparseable verdict,
+    exhausted budget) and for uncited sentences, which carry no quote to check.
+    Distinct from ``model_assisted`` so a response can never present an
+    unchecked claim as a checked one (see ``scoring.determine_status``).
+    """
+    return VerificationResult(
+        tier=3,
+        tier_label="unverified",
+        mechanical_check=mechanical_check,  # type: ignore[arg-type]
+        semantic_check="skipped",
+        failure_reason=reason,
+    )
+
+
+def _passed_verification(domain: str, primary: set[str], url: str = "") -> VerificationResult:
     """
     Build the citation-level verification for a semantically faithful citation.
 
@@ -307,7 +253,7 @@ def _passed_verification(domain: str, primary: set[str]) -> VerificationResult:
     their perceived quality — they are eligible for Tier 2/3 at the sentence
     level but not Tier 1 here.
     """
-    if is_primary_domain(domain, primary):
+    if is_primary_source(domain, url, primary):
         return VerificationResult(
             tier=1,
             tier_label="authoritative",
@@ -393,6 +339,13 @@ def _aggregate_sentence_verification(
             failure_reason=failure,
         )
 
+    if any(result.tier_label == "unverified" for result in citation_results):
+        failure = next(
+            (r.failure_reason for r in citation_results if r.tier_label == "unverified"),
+            "At least one citation could not be semantically verified.",
+        )
+        return _unverified("passed", failure or "Semantic check unavailable.")
+
     all_semantic_passed = all(result.semantic_check == "passed" for result in citation_results)
     citation_domains = {
         str(chunk_lookup.get(citation.chunk_id, {}).get("domain", ""))
@@ -400,8 +353,16 @@ def _aggregate_sentence_verification(
         if chunk_lookup.get(citation.chunk_id, {}).get("domain")
     }
 
-    # Tier 1: requires at least one *primary* source (not just any authoritative one).
-    primary_hit = any(is_primary_domain(domain, primary_domains) for domain in citation_domains)
+    # Tier 1: requires at least one *primary* source page (not just any
+    # authoritative one, and not user-generated content on a primary domain).
+    primary_hit = any(
+        is_primary_source(
+            str(chunk_lookup.get(c.chunk_id, {}).get("domain", "")),
+            str(chunk_lookup.get(c.chunk_id, {}).get("source_url", "")),
+            primary_domains,
+        )
+        for c in verified_citations
+    )
     if all_semantic_passed and primary_hit:
         return VerificationResult(
             tier=1,
@@ -543,18 +504,7 @@ fact? Output valid JSON only.
 
 def _parse_corroboration_response(raw: str) -> tuple[bool, str]:
     """Parse the corroboration verdict. Raises ValueError on malformed output."""
-    clean = re.sub(r"<think>.*?</think>", "", raw.strip(), flags=re.DOTALL)
-    clean = re.sub(r"^```(?:json)?\s*", "", clean.strip(), flags=re.IGNORECASE)
-    clean = re.sub(r"\s*```$", "", clean.strip())
-    try:
-        data = json.loads(clean)
-    except json.JSONDecodeError as first_err:
-        salvaged = _extract_first_json_object(clean)
-        if salvaged is None:
-            raise ValueError(
-                f"Corroboration response is not valid JSON: {first_err}"
-            ) from first_err
-        data = json.loads(salvaged)
+    data = parse_json_object(raw)
     if not isinstance(data.get("corroborated"), bool):
         raise ValueError(f"corroborated must be a bool, got {data.get('corroborated')!r}")
     reasoning = str(data.get("reasoning", "")).strip()
@@ -584,18 +534,7 @@ async def _check_corroboration(
             ),
         },
     ]
-    completion_kwargs = build_completion_kwargs(model=model, messages=messages, temperature=0.0)
-    tracer = get_tracer()
-    with tracer.start_as_current_span("corroboration.llm_call", attributes={"model": model}):
-        start = time.monotonic()
-        consume_llm_budget("corroboration")
-        async with get_llm_semaphore():
-            response = await litellm.acompletion(**completion_kwargs)
-        LLM_CALL_DURATION.labels(node="corroboration", model=safe_model_label(model)).observe(
-            time.monotonic() - start
-        )
-        record_llm_usage(getattr(response, "usage", None), "corroboration", model)
-    raw = response.choices[0].message.content or ""
+    raw = await call_llm("corroboration", model, messages)
     return _parse_corroboration_response(raw)
 
 
@@ -711,18 +650,7 @@ Output valid JSON only.
 
 def _parse_contradiction_response(raw: str) -> tuple[bool, str]:
     """Parse the contradiction verdict. Raises ValueError on malformed output."""
-    clean = re.sub(r"<think>.*?</think>", "", raw.strip(), flags=re.DOTALL)
-    clean = re.sub(r"^```(?:json)?\s*", "", clean.strip(), flags=re.IGNORECASE)
-    clean = re.sub(r"\s*```$", "", clean.strip())
-    try:
-        data = json.loads(clean)
-    except json.JSONDecodeError as first_err:
-        salvaged = _extract_first_json_object(clean)
-        if salvaged is None:
-            raise ValueError(
-                f"Contradiction response is not valid JSON: {first_err}"
-            ) from first_err
-        data = json.loads(salvaged)
+    data = parse_json_object(raw)
     if not isinstance(data.get("contradicted"), bool):
         raise ValueError(f"contradicted must be a bool, got {data.get('contradicted')!r}")
     reasoning = str(data.get("reasoning", "")).strip()
@@ -752,18 +680,7 @@ async def _check_contradiction(
             ),
         },
     ]
-    completion_kwargs = build_completion_kwargs(model=model, messages=messages, temperature=0.0)
-    tracer = get_tracer()
-    with tracer.start_as_current_span("contradiction.llm_call", attributes={"model": model}):
-        start = time.monotonic()
-        consume_llm_budget("contradiction")
-        async with get_llm_semaphore():
-            response = await litellm.acompletion(**completion_kwargs)
-        LLM_CALL_DURATION.labels(node="contradiction", model=safe_model_label(model)).observe(
-            time.monotonic() - start
-        )
-        record_llm_usage(getattr(response, "usage", None), "contradiction", model)
-    raw = response.choices[0].message.content or ""
+    raw = await call_llm("contradiction", model, messages)
     return _parse_contradiction_response(raw)
 
 
@@ -806,32 +723,40 @@ async def _verify_citation(
         },
     ]
 
-    completion_kwargs = build_completion_kwargs(
-        model=model,
-        messages=messages,
-        temperature=0.0,
-    )
-    tracer = get_tracer()
-    with tracer.start_as_current_span(
-        "semantic.llm_call",
-        attributes={"model": model, "chunk_id": chunk_id},
-    ):
-        start = time.monotonic()
-        consume_llm_budget("semantic")
-        async with get_llm_semaphore():
-            response = await litellm.acompletion(**completion_kwargs)
-        LLM_CALL_DURATION.labels(node="semantic", model=safe_model_label(model)).observe(
-            time.monotonic() - start
-        )
-        record_llm_usage(getattr(response, "usage", None), "semantic", model)
-    raw = response.choices[0].message.content or ""
+    raw = await call_llm("semantic", model, messages)
     data = _parse_semantic_response(raw)
 
     if data["semantic_check"] == "failed":
         failure_reason = str(data["failure_reason"])
         return _failed_semantic_verification(failure_reason), failure_reason
 
-    return _passed_verification(domain, primary), None
+    return _passed_verification(domain, primary, str(chunk_data.get("source_url", ""))), None
+
+
+# (slot index in the output, sentence_id, claim text, citations, provisional verdict)
+_GateEntry = tuple[int, str, str, list[VerifiedCitation], VerificationResult]
+
+
+async def _run_gate(
+    gate: Any,
+    entries: list[_GateEntry],
+    verdicts: dict[int, VerificationResult],
+    chunk_lookup: dict[str, dict[str, Any]],
+    model: str,
+    audit: list[dict[str, Any]],
+) -> None:
+    """Apply one cross-source gate to every entry concurrently, updating
+    ``verdicts`` in place. Each gate fails safe internally (it catches its own
+    check errors), so one sentence's failure never sinks the others."""
+    if not entries:
+        return
+    calls: list[Awaitable[VerificationResult]] = [
+        gate(sentence_id, claim_text, citations, chunk_lookup, model, verdicts[slot], audit)
+        for slot, sentence_id, claim_text, citations, _ in entries
+    ]
+    results = await asyncio.gather(*calls)
+    for entry, verdict in zip(entries, results, strict=True):
+        verdicts[entry[0]] = verdict
 
 
 async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
@@ -882,7 +807,6 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
         )
     )
 
-    final_sentences: list[dict] = []
     rewrite_requests: list[str] = []
 
     # PASS 1: Dispatch all semantic LLM calls concurrently via asyncio.gather.
@@ -919,24 +843,26 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
         key: result for key, result in zip(task_keys, gathered_results, strict=True)
     }
 
-    # PASS 2: Collect results and build outputs
+    # PASS 2: Collect results and build provisional sentence verdicts. The
+    # cross-source gates run after this loop, concurrently across sentences;
+    # ``final_slots`` preserves the draft order.
+    final_slots: list[dict | None] = []
+    gated: list[_GateEntry] = []
     for sentence_dict in draft_sentences:
         sentence_id = sentence_dict["sentence_id"]
         claim_text = sentence_dict["text"]
         citations = [Citation(**citation) for citation in sentence_dict.get("citations") or []]
 
         if not sentence_dict.get("is_cited") or not citations:
-            # Uncited transition sentences are permitted by the synthesizer prompt.
-            # They carry no factual claim, so mechanical and semantic checks are
-            # skipped rather than failed.  No rewrite request is generated.
-            sentence_verification = VerificationResult(
-                tier=3,
-                tier_label="model_assisted",
-                mechanical_check="skipped",
-                semantic_check="skipped",
-                failure_reason=None,
+            # Uncited transition sentences are permitted by the synthesizer prompt,
+            # but nothing about them was checked, so they are labelled
+            # "unverified" (never "model_assisted", which promises a verbatim
+            # quote). They are excluded from the confidence score and from the
+            # success decision (scoring.py). No rewrite request is generated.
+            sentence_verification = _unverified(
+                "skipped", "Uncited sentence — no source quote was checked."
             )
-            final_sentences.append(
+            final_slots.append(
                 FinalSentence(
                     sentence_id=sentence_id,
                     text=claim_text,
@@ -983,23 +909,20 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                     rewrite_reason: str | None = None
                     result = results_map.get((sentence_id, citation.citation_id))
                     if isinstance(result, BaseException):
-                        # Infrastructure error (timeout, API down) for this one citation.
-                        # Degrade to Tier 3 rather than aborting the whole pass: the
-                        # claim text may be perfectly fine; we simply could not verify it.
-                        # Tier 1/2 are blocked because all_semantic_passed will be False
-                        # (semantic_check="skipped" ≠ "passed" in _aggregate_sentence_verification).
+                        # The check did not run to completion for this citation
+                        # (provider error, timeout, unparseable verdict, exhausted
+                        # budget). Degrade this citation only — the claim may be
+                        # fine — but label it "unverified" so the sentence can
+                        # neither reach Tier 1/2 nor let the response report
+                        # status="success".
                         logger.warning(
-                            "Semantic check errored for citation %s — degrading to Tier 3: %s",
+                            "Semantic check errored for citation %s — marking unverified: %s",
                             citation.citation_id,
                             result,
                         )
                         SEMANTIC_DEGRADATIONS.inc()
-                        vr = VerificationResult(
-                            tier=3,
-                            tier_label="model_assisted",
-                            mechanical_check="passed",
-                            semantic_check="skipped",
-                            failure_reason=f"Semantic check unavailable: {type(result).__name__}",
+                        vr = _unverified(
+                            "passed", f"Semantic check unavailable: {type(result).__name__}"
                         )
                         audit.append(
                             _audit(
@@ -1031,6 +954,7 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                 exact_source_quote=citation.exact_source_quote,
                 verification=vr,
                 source=_resolve_citation_source(citation.chunk_id, chunk_lookup),
+                matched_source_text=(mechanical_payload or {}).get("matched_source_text"),
             )
             verified_citations.append(verified_citation)
 
@@ -1054,46 +978,57 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
             primary_domains,
         )
 
-        # Contradiction gate (runs first — the strongest signal): a multi-domain
-        # sentence whose sources actively conflict becomes Tier 6 (Conflicted),
-        # overriding a provisional Tier 1/2. A surfaced conflict matters more than
-        # authority or coverage, and conflicting sources cannot corroborate, so
-        # this short-circuits the corroboration gate below.
-        if contradiction_enabled and sentence_verification.tier in (1, 2):
-            sentence_verification = await _apply_contradiction_gate(
+        final_slots.append(None)
+        gated.append(
+            (
+                len(final_slots) - 1,
                 sentence_id,
                 claim_text,
                 verified_citations,
-                chunk_lookup,
-                model,
                 sentence_verification,
-                audit,
             )
-
-        # Tier 2 corroboration gate: a provisional Tier 2 (multi-domain coverage)
-        # is confirmed only if >=2 distinct sources independently corroborate the
-        # claim. Otherwise it is coverage, not corroboration, and drops to Tier 3.
-        # Skipped when the sentence was just flagged Tier 6 (tier != 2).
-        if corroboration_enabled and sentence_verification.tier == 2:
-            sentence_verification = await _apply_corroboration_gate(
-                sentence_id,
-                claim_text,
-                verified_citations,
-                chunk_lookup,
-                model,
-                sentence_verification,
-                audit,
-            )
-
-        final_sentences.append(
-            FinalSentence(
-                sentence_id=sentence_id,
-                text=claim_text,
-                is_cited=True,
-                citations=verified_citations,
-                verification=sentence_verification,
-            ).model_dump()
         )
+
+    verdicts: dict[int, VerificationResult] = {entry[0]: entry[4] for entry in gated}
+
+    # Contradiction gate (runs first — the strongest signal): a multi-domain
+    # sentence whose sources actively conflict becomes Tier 6 (Conflicted),
+    # overriding a provisional Tier 1/2. A surfaced conflict matters more than
+    # authority or coverage, and conflicting sources cannot corroborate, so it
+    # short-circuits the corroboration gate below.
+    if contradiction_enabled:
+        await _run_gate(
+            _apply_contradiction_gate,
+            [e for e in gated if verdicts[e[0]].tier in (1, 2)],
+            verdicts,
+            chunk_lookup,
+            model,
+            audit,
+        )
+
+    # Tier 2 corroboration gate: a provisional Tier 2 (multi-domain coverage) is
+    # confirmed only if >=2 distinct sources independently corroborate the
+    # claim; otherwise it is coverage, not corroboration, and drops to Tier 3.
+    # Sentences just flagged Tier 6 are skipped (tier != 2).
+    if corroboration_enabled:
+        await _run_gate(
+            _apply_corroboration_gate,
+            [e for e in gated if verdicts[e[0]].tier == 2],
+            verdicts,
+            chunk_lookup,
+            model,
+            audit,
+        )
+
+    for slot, sentence_id, claim_text, verified_citations, _ in gated:
+        final_slots[slot] = FinalSentence(
+            sentence_id=sentence_id,
+            text=claim_text,
+            is_cited=True,
+            citations=verified_citations,
+            verification=verdicts[slot],
+        ).model_dump()
+    final_sentences = [slot for slot in final_slots if slot is not None]
 
     audit.append(
         _audit(

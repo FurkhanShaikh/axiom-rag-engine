@@ -186,7 +186,6 @@ async def run_case(case: GoldenCase, engine: Any, model: str) -> CaseResult:
 
 async def validate_case(case: GoldenCase) -> CaseResult:
     """LLM-free pass: run the deterministic stages and report the pre-LLM gate."""
-    from axiom_rag_engine.config.settings import get_settings
     from axiom_rag_engine.nodes.ranker import ranker_node
     from axiom_rag_engine.nodes.retriever import (
         MockSearchBackend,
@@ -194,6 +193,7 @@ async def validate_case(case: GoldenCase) -> CaseResult:
         set_search_backend,
     )
     from axiom_rag_engine.nodes.scorer import scorer_node
+    from axiom_rag_engine.nodes.synthesizer import _pre_llm_unanswerable_reason
     from axiom_rag_engine.state import make_initial_state
 
     app_config, pipeline_config = _merged_configs(case)
@@ -213,15 +213,15 @@ async def validate_case(case: GoldenCase) -> CaseResult:
 
     ranked = state.get("ranked_chunks") or []
     best = max((c.get("ranking_score", 0.0) for c in ranked), default=0.0)
-    gate_fires = not ranked or best < get_settings().min_usable_ranking_score
+    # Use the synthesizer's own gate so this eval can never drift from it.
+    gate_reason = _pre_llm_unanswerable_reason(ranked)
+    gate_fires = gate_reason is not None
 
     failures: list[str] = []
     # Only the deterministic gate can be asserted without an LLM: a case that
     # expects answerable=True must at least survive the pre-LLM gate.
     if case.expect.get("answerable") is True and gate_fires:
-        failures.append(
-            f"pre-LLM gate would mark this unanswerable (best ranking_score={best:.3f})"
-        )
+        failures.append(f"pre-LLM gate would mark this unanswerable: {gate_reason}")
     return CaseResult(
         case_id=case.case_id,
         passed=not failures,

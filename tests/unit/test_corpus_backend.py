@@ -52,12 +52,12 @@ def store(tmp_path: Path) -> CorpusStore:
 
 @pytest.fixture(autouse=True)
 def _patch_query_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route the backend's async query embedding to the deterministic fake."""
+    """Route the backend's (synchronous) query embedding to the deterministic fake."""
 
-    async def _fake_embed_query(model: str, query: str) -> list[float]:
+    def _fake_embed_query(model: str, query: str) -> list[float]:
         return _vectorize(query)
 
-    monkeypatch.setattr(cb, "embed_query", _fake_embed_query)
+    monkeypatch.setattr(cb, "embed_query_sync", _fake_embed_query)
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +109,8 @@ class TestCorpusSearchBackend:
         results = backend.search("alpha")
         assert results
         top = results[0]
-        assert set(top) == {"url", "content", "title", "content_mode"}
+        assert set(top) == {"url", "content", "title", "source", "content_mode"}
+        assert top["source"] == "upload://d1"
         assert top["content"] == "alpha alpha alpha"
         assert top["content_mode"] == "raw"
         assert top["title"] == "Title d1"
@@ -119,6 +120,16 @@ class TestCorpusSearchBackend:
         _seed(store, "d1", ["alpha one", "beta two", "gamma three", "delta four"])
         backend = CorpusSearchBackend(store, embedding_model="m", max_results=2)
         assert len(backend.search("alpha")) == 2
+
+    async def test_search_works_from_a_thread_with_a_running_loop(self, store: CorpusStore) -> None:
+        # The backend used to wrap an async embedder in asyncio.run(), which
+        # cannot run inside an active event loop and leaves LiteLLM's aiohttp
+        # sessions bound to throwaway loops. A synchronous embed call has no
+        # loop affinity at all.
+        _seed(store, "d1", ["alpha alpha alpha", "beta beta"])
+        backend = CorpusSearchBackend(store, embedding_model="m", max_results=5)
+        results = backend.search("alpha")  # called directly on the running loop
+        assert results and results[0]["content"] == "alpha alpha alpha"
 
     def test_empty_query_returns_nothing(self, store: CorpusStore) -> None:
         _seed(store, "d1", ["alpha one"])
@@ -135,10 +146,10 @@ class TestCorpusSearchBackend:
     ) -> None:
         _seed(store, "d1", ["alpha one"])
 
-        async def _boom(model: str, query: str) -> list[float]:
+        def _boom(model: str, query: str) -> list[float]:
             raise RuntimeError("embedder down")
 
-        monkeypatch.setattr(cb, "embed_query", _boom)
+        monkeypatch.setattr(cb, "embed_query_sync", _boom)
         backend = CorpusSearchBackend(store, embedding_model="m")
         assert backend.search("alpha") == []  # soft failure, not an exception
 

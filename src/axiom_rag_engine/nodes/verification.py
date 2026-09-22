@@ -26,7 +26,7 @@ from typing import Any, cast
 from axiom_rag_engine.config.observability import LOOP_EXHAUSTED_TIER5, get_tracer
 from axiom_rag_engine.models import VerificationResult
 from axiom_rag_engine.nodes.semantic import semantic_verifier_node
-from axiom_rag_engine.state import GraphState
+from axiom_rag_engine.state import GraphState, loop_limits, rewrites_remaining
 from axiom_rag_engine.utils.audit import make_audit_event
 from axiom_rag_engine.verifiers.mechanical import MechanicalVerifier
 
@@ -46,6 +46,27 @@ def _build_tier5_rewrite_request(
         f"Sentence {sentence_id}, citation {citation_id} (chunk {chunk_id}): "
         f"Tier 5 (hallucinated) failure — {failure_reason}"
     )
+
+
+def _pass_rank(final_sentences: list[dict[str, Any]]) -> list[int]:
+    """Sort key for a verification pass — lower is better.
+
+    Primary: fewest sentences that still fail verification (Tier 4/5). Then:
+    most fully verified claims (Tier 1-3 and not "unverified").
+    """
+    failed = 0
+    verified = 0
+    for sentence in final_sentences:
+        vr = sentence.get("verification") or {}
+        if vr.get("tier") in (4, 5):
+            failed += 1
+        elif (
+            sentence.get("is_cited")
+            and vr.get("tier_label") != "unverified"
+            and vr.get("tier") in (1, 2, 3)
+        ):
+            verified += 1
+    return [failed, -verified]
 
 
 async def verification_node(state: GraphState) -> dict[str, Any]:
@@ -148,13 +169,18 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
                     ),
                 ).model_dump()
             else:
-                mechanical_results[cit_id] = VerificationResult(
-                    tier=3,
-                    tier_label="model_assisted",
-                    mechanical_check="passed",
-                    semantic_check="skipped",
-                    failure_reason=None,
-                ).model_dump()
+                mechanical_results[cit_id] = {
+                    **VerificationResult(
+                        tier=3,
+                        tier_label="model_assisted",
+                        mechanical_check="passed",
+                        semantic_check="skipped",
+                        failure_reason=None,
+                    ).model_dump(),
+                    # Carried alongside the verdict so the response can show the
+                    # source's own text (VerificationResult ignores the extra key).
+                    "matched_source_text": result.matched_source_text,
+                }
             audit.append(
                 _audit(
                     "mechanical_result",
@@ -215,29 +241,52 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
     # Merge audit trails.
     all_audit: list[dict] = audit + semantic_result.get("audit_trail", [])
 
-    # M7 fix: loop_count is incremented here (once per verification pass) rather
-    # than inside semantic_verifier_node.  The semantic node previously incremented
-    # unconditionally — including the first pass — so max_rewrite_loops=3 allowed
-    # only 2 actual rewrites.  Incrementing here keeps the counter semantically
-    # correct: it counts completed verification cycles.
+    # loop_count counts completed verification passes in this retrieval round
+    # (the orchestrator owns it; the semantic node never touches it).
     new_loop_count = state.get("loop_count", 0) + 1
+    final_sentences: list[dict[str, Any]] = semantic_result.get("final_sentences", [])
+
+    # Track the best pass across the whole request (rewrites and re-retrievals).
+    rank = _pass_rank(final_sentences)
+    best_rank = state.get("best_pass_rank")
+    best_sentences: list[dict[str, Any]] = list(state.get("best_final_sentences") or [])
+    if best_rank is None or rank < best_rank:
+        best_rank, best_sentences = rank, final_sentences
+
+    # Terminal-by-exhaustion: failures remain and neither another rewrite nor
+    # another retrieval round is allowed (mirrors route_post_verification).
+    _, max_retries = loop_limits(state)
+    retry_count: int = state.get("retrieval_retry_count", 0)
+    is_final_attempt = (
+        pending_count > 0
+        and not rewrites_remaining(state, new_loop_count)
+        and retry_count >= max_retries
+    )
+
+    if is_final_attempt and best_sentences is not final_sentences:
+        # A later pass came out worse than an earlier one — return the best.
+        all_audit.append(
+            _audit(
+                "best_pass_selected",
+                {
+                    "returned_rank": best_rank,
+                    "last_pass_rank": rank,
+                    "loop_count": new_loop_count,
+                    "retrieval_retry_count": retry_count,
+                },
+            )
+        )
+        final_sentences = best_sentences
 
     # -----------------------------------------------------------------------
     # Loop-exhaustion guard: when ALL retry budget is consumed and unresolved
-    # Tier 5 sentences still remain, they will reach the final response verbatim.
+    # Tier 5 sentences still remain, they reach the final response (labelled).
     # Emit a metric and an audit event so operators can alert on this condition.
     # -----------------------------------------------------------------------
-    stages_cfg: dict = (state.get("pipeline_config") or {}).get("stages") or {}
-    max_loops: int = stages_cfg.get("max_rewrite_loops", 3)
-    max_retries: int = stages_cfg.get("max_retrieval_retries", 1)
-    retry_count: int = state.get("retrieval_retry_count", 0)
-
-    is_final_attempt = (new_loop_count >= max_loops) and (retry_count >= max_retries)
-    if is_final_attempt and pending_count > 0:
-        final_sents = semantic_result.get("final_sentences", [])
+    if is_final_attempt:
         tier5_count = sum(
             1
-            for s in final_sents
+            for s in final_sentences
             if isinstance(s.get("verification"), dict) and s["verification"].get("tier") == 5
         )
         if tier5_count > 0:
@@ -254,7 +303,9 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
             )
 
     return {
-        "final_sentences": semantic_result.get("final_sentences", []),
+        "final_sentences": final_sentences,
+        "best_final_sentences": best_sentences,
+        "best_pass_rank": best_rank,
         "rewrite_requests": all_rewrite_requests,
         "pending_rewrite_count": pending_count,
         "loop_count": new_loop_count,

@@ -9,12 +9,9 @@ from __future__ import annotations
 import functools
 import logging
 import os
-from collections.abc import Callable
-from functools import wraps
-from typing import Any, TypeVar
 
 from fastapi import FastAPI
-from opentelemetry import context, trace
+from opentelemetry import trace
 from opentelemetry.trace import Tracer
 from prometheus_client import Counter, Histogram
 
@@ -169,42 +166,3 @@ def safe_model_label(model: str) -> str:
     if model.startswith("ollama/"):
         return "ollama/…"
     return _LLM_LABEL_OTHER
-
-
-# ---------------------------------------------------------------------------
-# Thread context propagation helper
-# ---------------------------------------------------------------------------
-
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-def run_with_otel_context(fn: Callable[..., Any], *args: Any) -> Callable[[], Any]:
-    """
-    Capture the current OTel context **and** request-ID context var, then
-    return a zero-arg callable that reattaches both before invoking fn(*args).
-
-    Use with asyncio.to_thread() to propagate trace + log correlation context
-    across the async → sync thread boundary:
-
-        ctx_fn = run_with_otel_context(engine.invoke, initial_state)
-        result = await asyncio.to_thread(ctx_fn)
-
-    Without this, Python 3.11's asyncio.to_thread does not copy ContextVars,
-    so node loggers would lose the request ID.
-    """
-    from axiom_rag_engine.config.logging import request_id_ctx
-
-    otel_ctx = context.get_current()
-    rid = request_id_ctx.get()
-
-    @wraps(fn)
-    def _wrapper() -> Any:
-        token = context.attach(otel_ctx)
-        rid_token = request_id_ctx.set(rid)
-        try:
-            return fn(*args)
-        finally:
-            request_id_ctx.reset(rid_token)
-            context.detach(token)
-
-    return _wrapper

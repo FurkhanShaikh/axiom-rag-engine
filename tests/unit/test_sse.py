@@ -219,43 +219,94 @@ async def test_client_disconnect_cancels_inflight_pipeline() -> None:
     assert cancelled.is_set(), "engine iteration was not cancelled on client disconnect"
 
 
-@pytest.mark.asyncio
-async def test_stream_pipeline_emits_loop_event_on_rewrite() -> None:
-    events = [
-        _langgraph_event("on_chain_start", "verifier"),
-        _langgraph_event(
-            "on_chain_end",
-            "verifier",
-            output={"pending_rewrite_count": 1, "loop_count": 1, "retrieval_retry_count": 0},
-        ),
-        # Second verifier pass after rewrite
-        _langgraph_event("on_chain_start", "verifier"),
-        _langgraph_event(
-            "on_chain_end",
-            "verifier",
-            output={"pending_rewrite_count": 0, "loop_count": 1, "retrieval_retry_count": 0},
-        ),
-    ]
+def _unanswerable_response() -> Any:
+    from axiom_rag_engine.models import AxiomResponse, ConfidenceSummary, TierBreakdown
+
+    return AxiomResponse(
+        request_id="test-001",
+        status="unanswerable",
+        is_answerable=False,
+        confidence_summary=ConfidenceSummary(overall_score=0.0, tier_breakdown=TierBreakdown()),
+    )
+
+
+async def _loop_frames(events: list[dict]) -> list[dict]:
     payload = _make_payload()
     initial_state = {"request_id": "test-001", "audit_trail": [], "is_answerable": True}
-
-    with patch("axiom_rag_engine.api.sse.marshal_response") as mock_marshal:
-        from axiom_rag_engine.models import AxiomResponse, ConfidenceSummary, TierBreakdown
-
-        mock_marshal.return_value = AxiomResponse(
-            request_id="test-001",
-            status="unanswerable",
-            is_answerable=False,
-            confidence_summary=ConfidenceSummary(overall_score=0.0, tier_breakdown=TierBreakdown()),
-        )
+    with patch("axiom_rag_engine.api.sse.marshal_response", return_value=_unanswerable_response()):
         frames = await _collect(
             stream_pipeline(payload, engine=_mock_engine(events), initial_state=initial_state)  # type: ignore[arg-type]
         )
+    return [f for f in frames if f["type"] == "loop"]
 
-    loop_frames = [f for f in frames if f["type"] == "loop"]
+
+def _failed_pass(loop_count: int, retry: int = 0) -> list[dict]:
+    """A synthesis + verification pass that leaves one citation to fix."""
+    return [
+        _langgraph_event("on_chain_start", "synthesizer"),
+        _langgraph_event("on_chain_end", "synthesizer", output={"draft_sentences": [{}]}),
+        _langgraph_event("on_chain_start", "verifier"),
+        _langgraph_event(
+            "on_chain_end",
+            "verifier",
+            output={
+                "pending_rewrite_count": 1,
+                "rewrite_requests": ["Sentence s_01 ... Tier 5"],
+                "loop_count": loop_count,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_pipeline_emits_loop_event_when_rewrite_starts() -> None:
+    events = [
+        *_failed_pass(loop_count=1),
+        # The rewrite pass actually starts here.
+        _langgraph_event("on_chain_start", "synthesizer"),
+        _langgraph_event("on_chain_end", "synthesizer", output={"draft_sentences": [{}]}),
+        _langgraph_event("on_chain_start", "verifier"),
+        _langgraph_event(
+            "on_chain_end",
+            "verifier",
+            output={"pending_rewrite_count": 0, "rewrite_requests": [], "loop_count": 2},
+        ),
+    ]
+    loop_frames = await _loop_frames(events)
     assert len(loop_frames) == 1
     assert loop_frames[0]["reason"] == "rewrite"
     assert loop_frames[0]["loop_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_loop_event_when_a_failed_pass_ends_the_run() -> None:
+    # Pending failures on the last allowed pass: the graph ends, no rewrite runs,
+    # so announcing "rewriting..." would be wrong.
+    loop_frames = await _loop_frames(_failed_pass(loop_count=3))
+    assert loop_frames == []
+
+
+@pytest.mark.asyncio
+async def test_stream_pipeline_emits_loop_event_on_re_retrieval() -> None:
+    events = [
+        *_failed_pass(loop_count=1),
+        _langgraph_event("on_chain_start", "re_retriever"),
+        _langgraph_event(
+            "on_chain_end",
+            "re_retriever",
+            output={
+                "indexed_chunks": [],
+                "retrieval_retry_count": 1,
+                "loop_count": 0,
+                "rewrite_requests": [],
+            },
+        ),
+        # First synthesis on the fresh sources is not a rewrite.
+        _langgraph_event("on_chain_start", "synthesizer"),
+    ]
+    loop_frames = await _loop_frames(events)
+    assert [f["reason"] for f in loop_frames] == ["re_retrieve"]
+    assert loop_frames[0]["retrieval_retry_count"] == 1
 
 
 @pytest.mark.asyncio

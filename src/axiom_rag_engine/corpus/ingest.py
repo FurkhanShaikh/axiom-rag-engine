@@ -15,6 +15,7 @@ one standard.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 from collections.abc import Awaitable, Callable
@@ -131,7 +132,9 @@ async def ingest_text(
     """
     embedder = embedder or embed_documents
 
-    chunks = chunk_into_paragraphs(text)
+    # Sentence segmentation of a multi-megabyte document is CPU-bound; keep it
+    # (and the SQLite write below) off the event loop.
+    chunks = await asyncio.to_thread(chunk_into_paragraphs, text)
     if max_chunks is not None and max_chunks > 0:
         chunks = chunks[:max_chunks]
     if not chunks:
@@ -143,7 +146,8 @@ async def ingest_text(
     if len(vectors) != len(chunks):
         raise IngestionError(f"embedder returned {len(vectors)} vectors for {len(chunks)} chunks")
 
-    return store.add_document(
+    return await asyncio.to_thread(
+        store.add_document,
         doc_id=doc_id,
         title=title,
         source=source,

@@ -125,11 +125,12 @@ class TestRoutePostVerification:
         assert route_post_verification(state) == "__end__"
 
     def test_reretrieve_when_loop_exhausted_and_retries_left(self) -> None:
-        state = _base_state(loop_count=3, pending_rewrite_count=1, retrieval_retry_count=0)
+        # max_rewrite_loops=3: initial pass + 3 rewrites = 4 verification passes.
+        state = _base_state(loop_count=4, pending_rewrite_count=1, retrieval_retry_count=0)
         assert route_post_verification(state) == "re_retriever"
 
     def test_ends_when_loop_exhausted_and_retries_spent(self) -> None:
-        state = _base_state(loop_count=3, pending_rewrite_count=1, retrieval_retry_count=1)
+        state = _base_state(loop_count=4, pending_rewrite_count=1, retrieval_retry_count=1)
         assert route_post_verification(state) == "__end__"
 
     def test_ends_when_loop_exceeds_max_and_retries_spent(self) -> None:
@@ -151,9 +152,14 @@ class TestRoutePostVerification:
         assert route_post_verification(state) == "__end__"
 
     def test_respects_custom_max_rewrite_loops(self) -> None:
-        state = _base_state(loop_count=2, pending_rewrite_count=1, retrieval_retry_count=1)
+        state = _base_state(loop_count=3, pending_rewrite_count=1, retrieval_retry_count=1)
         state["pipeline_config"]["stages"]["max_rewrite_loops"] = 2
         assert route_post_verification(state) == "__end__"
+
+    def test_last_allowed_rewrite_still_loops(self) -> None:
+        # loop_count=3 with max 3: only 2 rewrites have run, so one more is allowed.
+        state = _base_state(loop_count=3, pending_rewrite_count=1, retrieval_retry_count=1)
+        assert route_post_verification(state) == "synthesizer"
 
     def test_loops_when_under_custom_max(self) -> None:
         state = _base_state(loop_count=1, pending_rewrite_count=1)
@@ -348,7 +354,8 @@ class TestEndToEndLoop:
     @patch("litellm.acompletion", new_callable=AsyncMock)
     async def test_loop_exhaustion_terminates_after_max_loops(self, mock_llm: AsyncMock) -> None:
         """
-        Synthesizer keeps hallucinating. After 3 loops the graph terminates.
+        Synthesizer keeps hallucinating. With max_rewrite_loops=3 the graph runs
+        the initial pass plus 3 rewrites, then terminates.
         """
         set_search_backend(MockSearchBackend(_SEARCH_RESULTS))
         hallucinated_json = json.dumps(
@@ -370,9 +377,9 @@ class TestEndToEndLoop:
                 ],
             }
         )
-        # 3 synthesis calls, all hallucinated. No semantic calls (mechanical fails).
+        # 4 synthesis calls, all hallucinated. No semantic calls (mechanical fails).
         mock_llm.side_effect = _make_model_router(
-            [hallucinated_json] * 3,
+            [hallucinated_json] * 4,
             [],
         )
 
@@ -381,7 +388,7 @@ class TestEndToEndLoop:
         # rewrite loop exhaustion specifically, not re-retrieve.
         result = await graph.ainvoke(_base_state(retrieval_retry_count=1))
 
-        assert result["loop_count"] == 3
+        assert result["loop_count"] == 4
         assert result["final_sentences"][0]["verification"]["tier"] == 5
 
     @patch("litellm.acompletion", new_callable=AsyncMock)
@@ -708,8 +715,9 @@ class TestFullPipelineIntegration:
 class TestLoopExhaustionMonitoring:
     async def test_tier5_audit_event_emitted_on_loop_exhaustion(self) -> None:
         """verification_node emits loop_exhausted_unresolved_tier5 when all budget is spent."""
-        # last possible iteration: loop_count = max_loops-1, retry_count = max_retries
-        state = _base_state(loop_count=2, retrieval_retry_count=1)
+        # Last possible pass: loop_count = max_loops going in (initial pass + all
+        # but the final rewrite done), retry_count = max_retries.
+        state = _base_state(loop_count=3, retrieval_retry_count=1)
         state["pipeline_config"]["stages"]["max_rewrite_loops"] = 3
         state["pipeline_config"]["stages"]["max_retrieval_retries"] = 1
         # Citation pointing to a non-existent chunk → mechanical Tier 5 failure.

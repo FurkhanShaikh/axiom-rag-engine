@@ -76,6 +76,14 @@ class GraphState(TypedDict):
     # ------------------------------------------------------------------
     # Plain list — replaced wholesale once verification fully passes.
     final_sentences: list[dict]
+    # Best verified pass seen so far in this request (across rewrite passes AND
+    # retrieval retries — final sentences are self-contained, citations carry
+    # their resolved source). Returned instead of the last pass when every retry
+    # is exhausted and the last pass is worse. Deliberately NOT cleared by
+    # reset_verification_state.
+    best_final_sentences: list[dict]
+    # Sort key of best_final_sentences (lower is better); None before any pass.
+    best_pass_rank: list[int] | None
     # operator.add — every node appends its own audit events; the audit
     # trail is never overwritten, preserving causality across re-entries.
     audit_trail: Annotated[Sequence[dict], operator.add]
@@ -112,8 +120,41 @@ def make_initial_state(
         retrieval_retry_count=0,
         mechanical_results={},
         final_sentences=[],
+        best_final_sentences=[],
+        best_pass_rank=None,
         audit_trail=[],
     )
+
+
+# Defaults mirror PipelineStagesConfig; used when a state carries no stage config
+# (direct node calls in tests / evals).
+DEFAULT_MAX_REWRITE_LOOPS = 2
+DEFAULT_MAX_RETRIEVAL_RETRIES = 1
+
+
+def loop_limits(state: GraphState | dict) -> tuple[int, int]:
+    """Return ``(max_rewrite_loops, max_retrieval_retries)`` for this request.
+
+    ``max_rewrite_loops`` is the number of *rewrite* passes allowed per
+    retrieval round (so each round runs at most ``max_rewrite_loops + 1``
+    synthesis passes). Shared by the router (graph.py) and the verifier's
+    exhaustion check so the two can never disagree.
+    """
+    stages: dict = (state.get("pipeline_config") or {}).get("stages") or {}
+    return (
+        int(stages.get("max_rewrite_loops", DEFAULT_MAX_REWRITE_LOOPS)),
+        int(stages.get("max_retrieval_retries", DEFAULT_MAX_RETRIEVAL_RETRIES)),
+    )
+
+
+def rewrites_remaining(state: GraphState | dict, loop_count: int) -> bool:
+    """True when another rewrite pass is allowed in the current retrieval round.
+
+    ``loop_count`` counts completed verification passes in this round, so
+    ``loop_count - 1`` rewrites have already run.
+    """
+    max_loops, _ = loop_limits(state)
+    return loop_count - 1 < max_loops
 
 
 def reset_verification_state() -> dict:

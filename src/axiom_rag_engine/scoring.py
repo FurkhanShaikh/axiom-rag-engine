@@ -14,6 +14,7 @@ from axiom_rag_engine.models import ConfidenceSummary, TierBreakdown
 #   Tier 1 (Authoritative)    → 1.0
 #   Tier 2 (Multi-Domain)     → 0.85
 #   Tier 3 (Model Assisted)   → 0.60
+#   Tier 3 (Unverified)       → 0.30  (cited, semantic check could not run)
 #   Tier 4 (Misrepresented)   → 0.20  (should rarely survive to final output)
 #   Tier 5 (Hallucinated)     → 0.00  (should never survive to final output)
 #   Tier 6 (Conflicted)       → 0.40  (opt-in; below Tier 3 — conflicting sources
@@ -28,6 +29,22 @@ _TIER_WEIGHTS: dict[int, float] = {
     6: 0.40,
 }
 
+# A cited claim whose semantic check could not run (tier 3, tier_label
+# "unverified"): the quote is verbatim but faithfulness is unknown, so it scores
+# well below a checked Tier 3 claim.
+_UNVERIFIED_WEIGHT = 0.30
+
+
+def _is_claim(sentence: dict[str, Any]) -> bool:
+    """Only cited sentences are claims. Uncited (transitional) sentences carry no
+    checked quote, so they are excluded from the tier breakdown, the confidence
+    score, and the success decision — they neither inflate nor deflate it."""
+    return bool(sentence.get("is_cited"))
+
+
+def _is_unverified(sentence: dict[str, Any]) -> bool:
+    return bool(sentence.get("verification", {}).get("tier_label") == "unverified")
+
 
 def compute_confidence_summary(
     final_sentences: list[dict[str, Any]],
@@ -41,13 +58,16 @@ def compute_confidence_summary(
     total_claims = 0
 
     for sentence in final_sentences:
+        if not _is_claim(sentence):
+            continue
         vr = sentence.get("verification", {})
         tier: int = vr.get("tier", 3)
 
         attr = f"tier_{tier}_claims"
         setattr(breakdown, attr, getattr(breakdown, attr, 0) + 1)
 
-        weighted_sum += _TIER_WEIGHTS.get(tier, 0.0)
+        weight = _UNVERIFIED_WEIGHT if _is_unverified(sentence) else _TIER_WEIGHTS.get(tier, 0.0)
+        weighted_sum += weight
         total_claims += 1
 
     overall = round(weighted_sum / total_claims, 4) if total_claims > 0 else 0.0
@@ -68,8 +88,11 @@ def determine_status(
     Rules:
       - "unanswerable" if escape hatch fired OR if the pipeline produced no
         sentences despite is_answerable=True (the answer could not be grounded).
-      - "success" if all sentences are Tier 1–3.
-      - "partial" if any sentence is Tier 4, 5, or 6 (mixed quality).
+      - "success" if every cited sentence is Tier 1–3 and was fully verified.
+      - "partial" if any cited sentence is Tier 4, 5, or 6, or is labelled
+        "unverified" (its semantic check could not run), or if the answer has
+        no cited sentence at all (nothing in it was checked).
+      - Uncited (transitional) sentences are ignored for the decision.
       - "error" comes only from exception handling, not here.
 
     M8 fix: empty final_sentences with is_answerable=True previously returned
@@ -84,9 +107,14 @@ def determine_status(
     if not final_sentences:
         return "unanswerable"
 
-    for s in final_sentences:
+    claims = [s for s in final_sentences if _is_claim(s)]
+    if not claims:
+        # Text was produced but none of it was checked against a source.
+        return "partial"
+
+    for s in claims:
         tier = s.get("verification", {}).get("tier", 3)
-        if tier in (4, 5, 6):
+        if tier in (4, 5, 6) or _is_unverified(s):
             return "partial"
 
     return "success"

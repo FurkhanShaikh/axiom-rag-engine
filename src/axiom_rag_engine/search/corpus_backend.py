@@ -11,23 +11,22 @@ returns the top-k chunks by cosine similarity, shaped as retriever result dicts.
 corpus) and concatenates their results; the retriever already deduplicates by URL
 and content hash, so overlap is harmless.
 
-Async-in-sync
--------------
+Threading
+---------
 The retriever calls ``search`` off the event loop (``asyncio.to_thread``), so
-these backends are synchronous. Query embedding is async (LiteLLM), so it runs
-under ``asyncio.run`` inside that worker thread — safe because no event loop is
-running there.
+these backends are synchronous, and query embedding uses LiteLLM's synchronous
+client (``embed_query_sync``). Wrapping the async embedder in ``asyncio.run``
+here would bind LiteLLM's cached HTTP sessions to throwaway event loops.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 from urllib.parse import quote
 
 from axiom_rag_engine.corpus.store import CorpusStore
-from axiom_rag_engine.embeddings import embed_query
+from axiom_rag_engine.embeddings import embed_query_sync
 from axiom_rag_engine.nodes.retriever import SearchBackend
 
 logger = logging.getLogger("axiom_rag_engine.search.corpus")
@@ -72,7 +71,7 @@ class CorpusSearchBackend:
         if not query.strip():
             return []
         try:
-            query_vec = asyncio.run(embed_query(self._model, query))
+            query_vec = embed_query_sync(self._model, query)
         except Exception:
             # Fail soft: a dead embedder must not abort retrieval. With 'both',
             # web results still flow; with 'corpus' the retriever reports empty.
@@ -85,6 +84,9 @@ class CorpusSearchBackend:
                 "url": corpus_chunk_url(hit.doc_id, hit.chunk_index),
                 "content": hit.text,
                 "title": hit.title,
+                # The operator's provenance label (filename, bucket path, ...),
+                # surfaced on citations as CitationSource.source_label.
+                "source": hit.source,
                 # Stored chunks are full extracted text, not search snippets, so
                 # citations are verified against the real source content.
                 "content_mode": "raw",
