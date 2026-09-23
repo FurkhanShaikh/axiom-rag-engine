@@ -268,12 +268,13 @@ async def run_pending(
     max_consecutive_infra: int = 3,
     total: int | None = None,
     already_done: int = 0,
+    max_items: int | None = None,
 ) -> bool:
     """Run ``runner(row)`` for each row, appending records. Returns True if it
     stopped early after ``max_consecutive_infra`` infrastructure failures in a
     row (the provider is down — recording more failures would be pointless)."""
     consecutive = 0
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(rows[:max_items] if max_items else rows, 1):
         record = await runner(row)
         _append_jsonl(runs_path, record)
         tiers = [bucket_of(s) for s in record.get("sentences", [])]
@@ -368,6 +369,7 @@ async def run_question(
 
     response = marshal_response(state["request_id"], result, False, get_llm_usage_snapshot())
     chunk_text = {c["chunk_id"]: c.get("text", "") for c in result.get("indexed_chunks") or []}
+    ranked = {c["chunk_id"]: c for c in result.get("ranked_chunks") or []}
     sentences = []
     for s in response.final_response:
         citations = [
@@ -377,6 +379,12 @@ async def run_question(
                 "passage": chunk_text.get(c.chunk_id)
                 or c.matched_source_text
                 or c.exact_source_quote,
+                # Candidate confidence signals (None when the chunk came from an
+                # earlier retrieval round that is no longer ranked).
+                "relevance_score": ranked.get(c.chunk_id, {}).get("relevance_score"),
+                "ranking_score": ranked.get(c.chunk_id, {}).get("ranking_score"),
+                "source_quality_score": ranked.get(c.chunk_id, {}).get("source_quality_score"),
+                "quote_chars": len(c.exact_source_quote),
             }
             for c in s.citations
         ]
@@ -400,7 +408,9 @@ async def run_question(
     return record
 
 
-async def phase_run(n: int, seed: int, model: str, runs_path: Path) -> None:
+async def phase_run(
+    n: int, seed: int, model: str, runs_path: Path, batch: int | None = None
+) -> None:
     from axiom_rag_engine.graph import build_axiom_graph
 
     latest = latest_records(_read_jsonl(runs_path))
@@ -414,7 +424,7 @@ async def phase_run(n: int, seed: int, model: str, runs_path: Path) -> None:
     async def runner(row: dict[str, Any]) -> dict[str, Any]:
         return await run_question(engine, backend, row, model)
 
-    await run_pending(rows, runner, runs_path, total=n, already_done=len(done))
+    await run_pending(rows, runner, runs_path, total=n, already_done=len(done), max_items=batch)
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +495,9 @@ async def judge_sentence(
     return {"verdict": "judge_error", "reason": raw[:200]}
 
 
-async def phase_judge(runs_path: Path, judged_path: Path, judge: str) -> None:
+async def phase_judge(
+    runs_path: Path, judged_path: Path, judge: str, batch: int | None = None
+) -> None:
     done = {(j["sample_id"], j["index"]) for j in _read_jsonl(judged_path)}
     records = [r for r in latest_records(_read_jsonl(runs_path)) if "sentences" in r]
     todo = [
@@ -495,6 +507,8 @@ async def phase_judge(runs_path: Path, judged_path: Path, judge: str) -> None:
         if (r["sample_id"], i) not in done
     ]
     _echo(f"judge: {len(done)} done, {len(todo)} to go ({judge})")
+    if batch:
+        todo = todo[:batch]
     for n, (record, index, sentence) in enumerate(todo, 1):
         verdict = await judge_sentence(sentence, _passages_for(sentence, record), judge)
         _append_jsonl(
@@ -546,6 +560,53 @@ def build_report(records: list[dict[str, Any]], judged: list[dict[str, Any]]) ->
     }
 
 
+def tier_distribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """How a run's sentences distribute over tiers, and how many sources they cite."""
+    latest = [r for r in latest_records(records) if not needs_retry(r)]
+    sentences = [s for r in latest for s in r.get("sentences") or []]
+    cited = [s for s in sentences if s.get("is_cited")]
+    counts: dict[str, int] = {}
+    for sentence in sentences:
+        counts[bucket_of(sentence)] = counts.get(bucket_of(sentence), 0) + 1
+    multi = sum(len({c.get("domain") for c in s.get("citations") or []}) >= 2 for s in cited)
+    return {
+        "questions": len(latest),
+        "pipeline_errors": sum("error" in r for r in latest),
+        "unanswerable": sum(r.get("status") == "unanswerable" for r in latest),
+        "sentences": len(sentences),
+        "share": {b: counts[b] / len(sentences) for b in BUCKET_ORDER if b in counts},
+        "multi_domain_rate": multi / len(cited) if cited else 0.0,
+        "citations_per_cited_sentence": (
+            sum(len(s.get("citations") or []) for s in cited) / len(cited) if cited else 0.0
+        ),
+    }
+
+
+def align_runs(
+    a: list[dict[str, Any]], b: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Restrict two runs to the questions both completed (a fair comparison)."""
+    la = {r["sample_id"]: r for r in latest_records(a) if not needs_retry(r)}
+    lb = {r["sample_id"]: r for r in latest_records(b) if not needs_retry(r)}
+    common = [sid for sid in la if sid in lb]
+    return [la[sid] for sid in common], [lb[sid] for sid in common]
+
+
+def render_comparison(name_a: str, a: dict[str, Any], name_b: str, b: dict[str, Any]) -> str:
+    lines = [f"{'':30} {name_a:>14} {name_b:>14}"]
+    for key in ("questions", "pipeline_errors", "unanswerable", "sentences"):
+        lines.append(f"{key:30} {a[key]:>14} {b[key]:>14}")
+    for key in ("multi_domain_rate", "citations_per_cited_sentence"):
+        lines.append(f"{key:30} {a[key]:>14.3f} {b[key]:>14.3f}")
+    for bucket in BUCKET_ORDER:
+        if bucket in a["share"] or bucket in b["share"]:
+            lines.append(
+                f"{'share ' + bucket:30} {a['share'].get(bucket, 0):>14.3f} "
+                f"{b['share'].get(bucket, 0):>14.3f}"
+            )
+    return "\n".join(lines)
+
+
 def render_report(report: dict[str, Any], judge: str) -> str:
     lines = [
         f"Questions: {report['questions']} ({report['errors']} pipeline errors, "
@@ -574,23 +635,49 @@ def render_report(report: dict[str, Any], judge: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--phase", choices=["run", "judge", "report", "all"], default="all")
+    parser.add_argument(
+        "--phase", choices=["run", "judge", "report", "compare", "all"], default="all"
+    )
     parser.add_argument("--n", type=int, default=100, help="Questions (seeded sample of ASQA dev)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", default="ollama/qwen3.5:9b", help="Synthesizer + verifier")
     parser.add_argument(
         "--judge", default="ollama/gemma4:e4b", help="Sentence judge (not the verifier)"
     )
+    parser.add_argument(
+        "--tag", default="", help="Label a variant (e.g. a prompt change) to keep its runs apart"
+    )
+    parser.add_argument(
+        "--compare-tag", default="", help="compare phase: the tag to compare against --tag"
+    )
+    parser.add_argument(
+        "--batch", type=int, default=None, help="Process at most N pending items, then exit"
+    )
     args = parser.parse_args()
 
-    runs_path = OUT_DIR / f"runs-{_slug(args.model)}-seed{args.seed}.jsonl"
-    judged_path = (
-        OUT_DIR / f"judged-{_slug(args.model)}-seed{args.seed}-by-{_slug(args.judge)}.jsonl"
+    def runs_file(tag: str) -> Path:
+        suffix = f"-{_slug(tag)}" if tag else ""
+        return OUT_DIR / f"runs-{_slug(args.model)}-seed{args.seed}{suffix}.jsonl"
+
+    runs_path = runs_file(args.tag)
+    judged_path = runs_path.with_name(
+        runs_path.stem.replace("runs-", "judged-", 1) + f"-by-{_slug(args.judge)}.jsonl"
     )
+    if args.phase == "compare":
+        a, b = align_runs(_read_jsonl(runs_file(args.compare_tag)), _read_jsonl(runs_path))
+        _echo(
+            render_comparison(
+                args.compare_tag or "baseline",
+                tier_distribution(a),
+                args.tag or "baseline",
+                tier_distribution(b),
+            )
+        )
+        return
     if args.phase in ("run", "all"):
-        asyncio.run(phase_run(args.n, args.seed, args.model, runs_path))
+        asyncio.run(phase_run(args.n, args.seed, args.model, runs_path, args.batch))
     if args.phase in ("judge", "all"):
-        asyncio.run(phase_judge(runs_path, judged_path, args.judge))
+        asyncio.run(phase_judge(runs_path, judged_path, args.judge, args.batch))
     if args.phase in ("report", "all"):
         report = build_report(_read_jsonl(runs_path), _read_jsonl(judged_path))
         _echo(render_report(report, args.judge))

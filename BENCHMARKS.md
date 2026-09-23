@@ -245,6 +245,60 @@ Tavily responses behind these numbers are cached in
 `evals/data/query_expansion_cache.json` (gitignored) so the run can be re-graded
 with another judge at no search cost.
 
+### Tier calibration — ASQA (2026-09-22)
+
+`evals/calibration_eval.py` ran 100 ASQA dev questions (seed 0) through the full
+pipeline: live Tavily retrieval (cached), `ollama/qwen3.5:9b` as synthesizer and
+verifier. Every sentence was then judged against the full text of its cited
+passages by a *different* model, `ollama/gemma4:e4b`. Two runs on the same
+questions and the same retrieved sources: before and after the synthesizer
+change that lets it see each chunk's source and asks it to cite every
+supporting source (up to 3).
+
+**Tier distribution**
+
+| | before | after |
+|---|---|---|
+| sentences citing ≥ 2 domains | 0.6% | **23.5%** |
+| Tier 1 / 2 / 3 share | 4.1% / 0% / 93.9% | 4.1% / **20.0%** / 71.8% |
+| Tier 4 / Tier 5 share | 0.3% / 1.3% | 1.6% / 1.6% |
+| citations per cited sentence | 1.03 | 1.40 |
+| pipeline errors / unanswerable | 5 / 13 | 1 / 13 |
+
+**Judged support per tier (after the change)**
+
+| tier | n | judged supported | 95% CI | confidence weight |
+|---|---|---|---|---|
+| T1 Authoritative | 10 | 1.00 | [0.72, 1.00] | 1.00 |
+| T2 Multi-Domain | 49 | 0.98 | [0.89, 1.00] | 0.85 |
+| T3 Model Assisted | 176 | 0.95 | [0.91, 0.98] | 0.60 |
+| T4 Misrepresented | 4 | 1.00 | [0.51, 1.00] | 0.20 |
+| T5 Hallucinated | 4 | 0.75 | [0.30, 0.95] | 0.00 |
+
+Before the change T3 measured 0.94 [0.91, 0.96] (n = 295) and T1 1.00 (n = 13).
+
+**Answer level (non-circular).** STR-EM against ASQA's gold short answers was
+0.385 → 0.352 for successful answers (answers got ~22% shorter, so they cover
+fewer of ASQA's deliberately multiple interpretations; the difference is within
+noise at n = 78). Spearman(overall_score, STR-EM) was −0.03 before and +0.13
+after — **the confidence score does not predict whether an answer is right.**
+
+**What this does and does not show.**
+
+- *Tier 2 is now reachable* and its sentences are judged as well supported as
+  Tier 3's, so the synthesizer change was kept.
+- *Every verified tier is judged ~95–100% supported*, and the T1/T2/T3
+  differences sit inside the confidence intervals. The judge also rated 3 of 4
+  Tier 5 sentences "supported" — possible when a claim is right but its quote
+  was not verbatim, but also a sign that this 4B local judge is lenient. With
+  this judge the data **cannot distinguish the tiers, so the tier weights were
+  not changed**: re-weighting on it would be tuning to noise. Re-judge the
+  cached runs with a stronger model (`--phase judge --judge <model>`, no
+  pipeline cost) before any weight change.
+- *The confidence score measures grounding, not correctness or completeness.*
+  A fully cited, faithful answer can still address the wrong interpretation of
+  a question; nothing in the score captures that.
+
 ### Verification
 
 > **Not yet recorded for the production model.** The semantic table is populated
@@ -345,8 +399,7 @@ ceiling) once you want the full keyed run gated nightly.
   (Arabic, accented Latin, …) and splits CJK/Thai runs into character bigrams —
   the standard dictionary-free approach, but weaker than a real segmenter. It
   did not change the SciFact numbers above (English).
-- **Tier calibration is not yet measured.** The harness exists
-  (`evals/calibration_eval.py`: ASQA gold answers at answer level, a separate
-  judge model at sentence level), but no full run has completed. An interrupted
-  run (28/100 questions, local qwen3.5:9b) assigned only Tier 3, so ASQA may not
-  exercise Tiers 1/2 at all.
+- **Tier calibration is only as good as its judge.** The ASQA calibration
+  above used a local 4B judge that rated nearly everything supported; it cannot
+  separate the tiers. A stronger judge is the next measurement, and the tier
+  weights are unvalidated until then.

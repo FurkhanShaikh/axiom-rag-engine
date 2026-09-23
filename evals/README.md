@@ -182,8 +182,9 @@ will score lower on Layer 1 than cloud models — compare like against like.
 - CJK lexical matching uses character bigrams (no word segmenter), so BM25
   relevance for Chinese/Japanese queries is approximate. The Arabic and CJK
   golden cases exercise the non-Latin path.
-- Tier calibration: the harness exists (`calibration_eval.py`, ASQA) but no
-  full run has completed yet. A partial run (28/100 questions, local
-  qwen3.5:9b) produced only Tier 3 sentences — trivia questions rarely
-  surface primary sources or multi-domain citations — so Tier 1/2 may stay
-  uncalibrated on ASQA.
+- Tier calibration (`calibration_eval.py`, ASQA) has run with a local 4B judge
+  (gemma4:e4b) that rates ~95–100% of sentences in every verified tier as
+  supported — too lenient to separate the tiers (see BENCHMARKS.md). Re-judge
+  the cached runs with a stronger model before drawing conclusions about the
+  tier weights. Use `--batch N` to process in short, resumable chunks and
+  `--tag` / `--phase compare` for A/B runs over the same cached sources.

@@ -91,7 +91,11 @@ doc_<N>_chunk_<X>).
 6. citation_id values must be globally unique across the entire response and \
 sequential: cite_1, cite_2, cite_3, ... — never restart numbering inside a new \
 sentence.
-7. Do NOT wrap your response in markdown code fences.
+7. Each chunk header names its source site (source=...). When chunks from \
+different sources state the same fact, cite each of them (up to 3 citations \
+per sentence), each with its own verbatim exact_source_quote from its own chunk. \
+Never cite a chunk that does not state the fact.
+8. Do NOT wrap your response in markdown code fences.
 """
 
 _USER_PROMPT_TEMPLATE = """\
@@ -152,8 +156,18 @@ def _render_previous_draft(draft_sentences: list[dict[str, Any]]) -> str:
 
 
 _CHUNK_ITEM_TEMPLATE = (
-    "<<<CHUNK chunk_id={chunk_id}>>>\n{text}\n<<<END_CHUNK chunk_id={chunk_id}>>>\n"
+    "<<<CHUNK chunk_id={chunk_id} source={source}>>>\n{text}\n<<<END_CHUNK chunk_id={chunk_id}>>>\n"
 )
+
+# The source domain lets the model see which chunks come from different sites
+# (so it can cite several — the basis of Tier 2). It is reduced to hostname
+# characters so a crafted URL can never break out of the chunk fence.
+_SOURCE_UNSAFE = re.compile(r"[^a-z0-9.\-]")
+
+
+def _source_label(chunk: dict[str, Any]) -> str:
+    return _SOURCE_UNSAFE.sub("", str(chunk.get("domain") or "").lower()) or "unknown"
+
 
 # Per-chunk cap for prompt-injection defense; keeps a single oversized page
 # from flooding the context window while still leaving room for the answer.
@@ -179,6 +193,7 @@ def _build_chunks_block(ranked_chunks: list[dict[str, Any]]) -> str:
         parts.append(
             _CHUNK_ITEM_TEMPLATE.format(
                 chunk_id=chunk["chunk_id"],
+                source=_source_label(chunk),
                 text=_sanitize_chunk_text(chunk.get("text", "")),
             )
         )

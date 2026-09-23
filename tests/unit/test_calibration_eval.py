@@ -212,3 +212,52 @@ class TestRunPending:
         )
         assert stopped is False
         assert len(cal._read_jsonl(tmp_path / "runs.jsonl")) == 5
+
+
+class TestBatching:
+    async def test_run_pending_processes_at_most_max_items(self, tmp_path) -> None:
+        async def runner(row: dict) -> dict:
+            return {"sample_id": row["sample_id"], "status": "success", "sentences": []}
+
+        rows = [{"sample_id": str(i)} for i in range(10)]
+        await cal.run_pending(rows, runner, tmp_path / "runs.jsonl", max_items=4)
+        assert len(cal._read_jsonl(tmp_path / "runs.jsonl")) == 4
+
+
+def _rec(sid: str, *sentences: tuple[int, str, int]) -> dict:
+    """Run record with sentences given as (tier, tier_label, distinct domains)."""
+    return {
+        "sample_id": sid,
+        "status": "success",
+        "sentences": [
+            {
+                "is_cited": True,
+                "verification": {"tier": t, "tier_label": label},
+                "citations": [{"domain": f"d{i}.com"} for i in range(domains)],
+            }
+            for t, label, domains in sentences
+        ],
+    }
+
+
+class TestTierDistribution:
+    def test_shares_and_multi_domain_rate(self) -> None:
+        records = [
+            _rec("a", (3, "model_assisted", 1), (2, "multi_source", 2)),
+            _rec("b", (3, "model_assisted", 1), (5, "hallucinated", 1)),
+            {"sample_id": "c", "error": "x", "error_kind": "pipeline"},
+        ]
+        dist = cal.tier_distribution(records)
+        assert dist["sentences"] == 4
+        assert dist["share"]["T3"] == pytest.approx(0.5)
+        assert dist["share"]["T2"] == pytest.approx(0.25)
+        assert dist["multi_domain_rate"] == pytest.approx(0.25)
+        assert dist["citations_per_cited_sentence"] == pytest.approx(5 / 4)
+        assert dist["pipeline_errors"] == 1
+
+    def test_compares_only_questions_present_in_both_runs(self) -> None:
+        a = [_rec("x", (3, "model_assisted", 1)), _rec("y", (3, "model_assisted", 1))]
+        b = [_rec("x", (2, "multi_source", 2))]
+        common_a, common_b = cal.align_runs(a, b)
+        assert [r["sample_id"] for r in common_a] == ["x"]
+        assert [r["sample_id"] for r in common_b] == ["x"]
