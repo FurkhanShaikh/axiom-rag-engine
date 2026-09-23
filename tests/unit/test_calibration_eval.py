@@ -105,3 +105,110 @@ class TestSpearman:
 
     def test_constant_input_is_undefined(self) -> None:
         assert cal.spearman([0.5, 0.5, 0.5], [1, 2, 3]) is None
+
+
+class TestErrorClassification:
+    def test_provider_connection_error_is_infrastructure(self) -> None:
+        import litellm
+
+        cause = litellm.APIConnectionError(
+            message="Cannot connect", llm_provider="ollama", model="m"
+        )
+        try:
+            raise RuntimeError("Synthesizer stage failed") from cause
+        except RuntimeError as exc:
+            assert cal.classify_error(exc) == "infra"
+
+    def test_plain_connection_and_timeout_errors_are_infrastructure(self) -> None:
+        assert cal.classify_error(ConnectionError("refused")) == "infra"
+        assert cal.classify_error(TimeoutError()) == "infra"
+
+    def test_malformed_model_output_is_a_pipeline_failure(self) -> None:
+        try:
+            raise RuntimeError("Synthesizer stage failed") from ValueError("not valid JSON")
+        except RuntimeError as exc:
+            assert cal.classify_error(exc) == "pipeline"
+
+
+class TestResume:
+    def test_latest_record_per_question_wins(self) -> None:
+        records = [
+            {"sample_id": "a", "error": "x", "error_kind": "infra"},
+            {"sample_id": "b", "status": "success"},
+            {"sample_id": "a", "status": "success"},
+        ]
+        latest = cal.latest_records(records)
+        assert [r["sample_id"] for r in latest] == ["a", "b"]
+        assert latest[0]["status"] == "success"
+
+    @pytest.mark.parametrize(
+        ("record", "retry"),
+        [
+            ({"sample_id": "a", "status": "success"}, False),
+            ({"sample_id": "a", "error": "e", "error_kind": "infra"}, True),
+            ({"sample_id": "a", "error": "e", "error_kind": "pipeline"}, False),
+            # Records written before error_kind existed are classified by message.
+            (
+                {
+                    "sample_id": "a",
+                    "error": "RuntimeError: Synthesizer stage failed: litellm.APIConnectionError: "
+                    "OllamaException - Cannot connect",
+                },
+                True,
+            ),
+            (
+                {
+                    "sample_id": "a",
+                    "error": "RuntimeError: Synthesizer stage failed: LLM response is not valid JSON",
+                },
+                False,
+            ),
+        ],
+    )
+    def test_only_infrastructure_failures_are_retried(self, record: dict, retry: bool) -> None:
+        assert cal.needs_retry(record) is retry
+
+    def test_report_ignores_infrastructure_failures_but_counts_pipeline_ones(self) -> None:
+        records = [
+            {"sample_id": "a", "error": "e", "error_kind": "infra"},
+            {"sample_id": "b", "error": "e", "error_kind": "pipeline"},
+            {
+                "sample_id": "c",
+                "status": "success",
+                "overall_score": 0.6,
+                "answer_text": "Ali Daei",
+                "qa_pairs": [{"short_answers": ["Ali Daei"]}],
+                "sentences": [],
+            },
+        ]
+        report = cal.build_report(records, [])
+        assert report["questions"] == 2  # the infra failure is not a result
+        assert report["errors"] == 1
+        assert report["pending_infra"] == 1
+
+
+class TestRunPending:
+    async def test_stops_after_consecutive_infrastructure_failures(self, tmp_path) -> None:
+        calls: list[str] = []
+
+        async def runner(row: dict) -> dict:
+            calls.append(row["sample_id"])
+            return {"sample_id": row["sample_id"], "error": "down", "error_kind": "infra"}
+
+        rows = [{"sample_id": str(i)} for i in range(10)]
+        stopped = await cal.run_pending(
+            rows, runner, tmp_path / "runs.jsonl", max_consecutive_infra=3
+        )
+        assert calls == ["0", "1", "2"]
+        assert stopped is True
+
+    async def test_pipeline_failures_do_not_stop_the_run(self, tmp_path) -> None:
+        async def runner(row: dict) -> dict:
+            return {"sample_id": row["sample_id"], "error": "bad json", "error_kind": "pipeline"}
+
+        rows = [{"sample_id": str(i)} for i in range(5)]
+        stopped = await cal.run_pending(
+            rows, runner, tmp_path / "runs.jsonl", max_consecutive_infra=3
+        )
+        assert stopped is False
+        assert len(cal._read_jsonl(tmp_path / "runs.jsonl")) == 5

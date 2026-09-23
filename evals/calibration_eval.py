@@ -196,6 +196,102 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+# ---------------------------------------------------------------------------
+# Failure handling / resume
+# ---------------------------------------------------------------------------
+
+# Legacy records (written before error_kind existed) are classified by message.
+_INFRA_MARKERS = (
+    "APIConnectionError",
+    "Timeout",
+    "ServiceUnavailable",
+    "InternalServerError",
+    "RateLimitError",
+    "BadGatewayError",
+    "Connection refused",
+    "Cannot connect",
+)
+
+
+def _infra_exception_types() -> tuple[type[BaseException], ...]:
+    import litellm
+
+    names = (
+        "APIConnectionError",
+        "Timeout",
+        "ServiceUnavailableError",
+        "InternalServerError",
+        "RateLimitError",
+        "BadGatewayError",
+    )
+    found = tuple(t for n in names if isinstance(t := getattr(litellm, n, None), type))
+    return (ConnectionError, TimeoutError, *found)
+
+
+def classify_error(exc: BaseException) -> str:
+    """'infra' for failures of the environment (provider unreachable, timeouts,
+    5xx) — retried on resume; 'pipeline' for failures of the system under test
+    (e.g. unparseable model output) — kept as results."""
+    infra = _infra_exception_types()
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, infra):
+            return "infra"
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return "pipeline"
+
+
+def needs_retry(record: dict[str, Any]) -> bool:
+    """Whether a stored run record should be re-run on resume."""
+    if "error" not in record:
+        return False
+    kind = record.get("error_kind")
+    if kind is not None:
+        return bool(kind == "infra")
+    return any(marker in record["error"] for marker in _INFRA_MARKERS)
+
+
+def latest_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Newest record per sample_id (retries append), in first-seen order."""
+    latest: dict[str, dict[str, Any]] = {}
+    for record in records:
+        latest[record["sample_id"]] = record
+    return list(latest.values())
+
+
+async def run_pending(
+    rows: list[dict[str, Any]],
+    runner: Any,
+    runs_path: Path,
+    max_consecutive_infra: int = 3,
+    total: int | None = None,
+    already_done: int = 0,
+) -> bool:
+    """Run ``runner(row)`` for each row, appending records. Returns True if it
+    stopped early after ``max_consecutive_infra`` infrastructure failures in a
+    row (the provider is down — recording more failures would be pointless)."""
+    consecutive = 0
+    for i, row in enumerate(rows, 1):
+        record = await runner(row)
+        _append_jsonl(runs_path, record)
+        tiers = [bucket_of(s) for s in record.get("sentences", [])]
+        _echo(
+            f"[{already_done + i}/{total or len(rows)}] {record.get('status', 'ERROR'):12} "
+            f"score={record.get('overall_score') or 0:.2f} {record.get('elapsed_s')}s "
+            f"{' '.join(tiers) or str(record.get('error', ''))[:80]}"
+        )
+        consecutive = consecutive + 1 if needs_retry(record) else 0
+        if consecutive >= max_consecutive_infra:
+            _echo(
+                f"Stopping: {consecutive} infrastructure failures in a row "
+                "(is the model server up?). Re-run to resume."
+            )
+            return True
+    return False
+
+
 def _slug(model: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", model).strip("-")
 
@@ -264,7 +360,9 @@ async def run_question(
         result = await engine.ainvoke(state, config={"configurable": {"search_backend": backend}})
     except Exception as exc:
         record.update(
-            error=f"{type(exc).__name__}: {exc}", elapsed_s=round(time.monotonic() - started, 1)
+            error=f"{type(exc).__name__}: {exc}",
+            error_kind=classify_error(exc),
+            elapsed_s=round(time.monotonic() - started, 1),
         )
         return record
 
@@ -305,20 +403,18 @@ async def run_question(
 async def phase_run(n: int, seed: int, model: str, runs_path: Path) -> None:
     from axiom_rag_engine.graph import build_axiom_graph
 
-    done = {r["sample_id"] for r in _read_jsonl(runs_path)}
+    latest = latest_records(_read_jsonl(runs_path))
+    done = {r["sample_id"] for r in latest if not needs_retry(r)}
+    retrying = sum(needs_retry(r) for r in latest)
     rows = [r for r in load_asqa(n, seed) if r["sample_id"] not in done]
-    _echo(f"run: {len(done)} done, {len(rows)} to go ({model})")
+    _echo(f"run: {len(done)} done, {len(rows)} to go ({retrying} infra retries) ({model})")
     engine = build_axiom_graph()
     backend = _CachedSearch()
-    for i, row in enumerate(rows, 1):
-        record = await run_question(engine, backend, row, model)
-        _append_jsonl(runs_path, record)
-        tiers = [bucket_of(s) for s in record.get("sentences", [])]
-        _echo(
-            f"[{len(done) + i}/{n}] {record.get('status', 'ERROR'):12} "
-            f"score={record.get('overall_score', 0):.2f} {record.get('elapsed_s')}s "
-            f"{' '.join(tiers) or record.get('error', '')[:80]}"
-        )
+
+    async def runner(row: dict[str, Any]) -> dict[str, Any]:
+        return await run_question(engine, backend, row, model)
+
+    await run_pending(rows, runner, runs_path, total=n, already_done=len(done))
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +487,7 @@ async def judge_sentence(
 
 async def phase_judge(runs_path: Path, judged_path: Path, judge: str) -> None:
     done = {(j["sample_id"], j["index"]) for j in _read_jsonl(judged_path)}
-    records = [r for r in _read_jsonl(runs_path) if "sentences" in r]
+    records = [r for r in latest_records(_read_jsonl(runs_path)) if "sentences" in r]
     todo = [
         (r, i, s)
         for r in records
@@ -421,6 +517,9 @@ async def phase_judge(runs_path: Path, judged_path: Path, judge: str) -> None:
 
 
 def build_report(records: list[dict[str, Any]], judged: list[dict[str, Any]]) -> dict[str, Any]:
+    latest = latest_records(records)
+    pending_infra = sum(needs_retry(r) for r in latest)
+    records = [r for r in latest if not needs_retry(r)]  # infra failures are not results
     ok = [r for r in records if "sentences" in r]
     answered = [r for r in ok if r.get("status") in ("success", "partial")]
     em = {r["sample_id"]: str_em(r.get("answer_text", ""), r["qa_pairs"]) for r in ok}
@@ -433,6 +532,7 @@ def build_report(records: list[dict[str, Any]], judged: list[dict[str, Any]]) ->
     return {
         "questions": len(records),
         "errors": len(records) - len(ok),
+        "pending_infra": pending_infra,
         "answered": len(answered),
         "judge_errors": len(judged) - len(valid),
         "buckets": summarize_buckets(valid),
@@ -448,7 +548,8 @@ def build_report(records: list[dict[str, Any]], judged: list[dict[str, Any]]) ->
 
 def render_report(report: dict[str, Any], judge: str) -> str:
     lines = [
-        f"Questions: {report['questions']} ({report['errors']} pipeline errors), "
+        f"Questions: {report['questions']} ({report['errors']} pipeline errors, "
+        f"{report.get('pending_infra', 0)} awaiting retry after infrastructure failures), "
         f"answered: {report['answered']}, judge errors: {report['judge_errors']}",
         f"Judge: {judge}",
         "",
