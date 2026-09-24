@@ -87,7 +87,7 @@ services:
 
   # ── Prometheus (metrics scraper) ──────────────────────────────────────────
   prometheus:
-    image: prom/prometheus:v3.4.1
+    image: prom/prometheus:v3.14.0
     container_name: axiom-prometheus
     ports:
       - "9090:9090"
