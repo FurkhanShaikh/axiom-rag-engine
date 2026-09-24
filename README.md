@@ -71,6 +71,8 @@ resolved configuration.
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
 | `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
 | `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
+| `AXIOM_ALLOWED_SYNTHESIZER_MODELS` | _(empty)_ | Synthesizer models callers may request besides the default when auth is required (others get 422). The verifier is always server-controlled when auth is required. |
+| `AXIOM_LLM_MAX_RETRIES` | `2` | Retries for transient provider failures (rate limit, timeout, 5xx) per LLM call. |
 | `AXIOM_EMBEDDING_MODEL` | _(empty)_ | LiteLLM embedding model to enable hybrid (BM25 + dense) ranking, e.g. `ollama/nomic-embed-text` or `text-embedding-3-small`. Empty = BM25-only. See [Hybrid retrieval](#hybrid-retrieval). |
 | `AXIOM_RRF_K` | `60` | Reciprocal-rank-fusion constant for hybrid ranking. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |

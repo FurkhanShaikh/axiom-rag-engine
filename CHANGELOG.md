@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Structured outputs.** Synthesizer, semantic-verifier, corroboration, and contradiction calls send a JSON Schema (`schemas.py`) where the provider supports it (LiteLLM `supports_response_schema`; Ollama via its native `format`), falling back to JSON mode otherwise. The lenient parser stays as a safety net. Measured on local Ollama (llama3.2:1b, qwen3.5:9b over the golden questions) parse success was already 100% in both modes, so the gain is shape guarantees on cloud providers rather than a measured local improvement.
 - **`is_cited` is derived from `citations`** when parsing synthesizer output, instead of failing the parse (and spending a retry) when a model gets the redundant flag wrong — observed live on llama3.2:1b. Every citation is still verified; a sentence without citations is labelled unverified either way.
 
+### Changed — model policy (breaking for production callers that set `models`)
+- **The verifier is server policy when auth is required.** The verifier grants the confidence tiers, so a caller could previously pick a lenient judge for its own answers. `models.verifier` is now ignored (and logged) unless auth is disabled.
+- **Caller-chosen synthesizers are allowlisted when auth is required.** `models.synthesizer` must be the server default or listed in `AXIOM_ALLOWED_SYNTHESIZER_MODELS`; anything else returns 422 before any model is called. Previously any LiteLLM model reachable with the operator's keys could be requested.
+- The response cache key uses the effective models, so an ignored override shares the cache entry of the request it resolves to.
+- Development/test environments (auth disabled) honour caller model choices as before.
+
 ### Changed — verification honesty (breaking for clients that assumed every Tier 3 was checked)
 - **New `tier_label: "unverified"` (tier 3).** A cited sentence whose semantic check could not run — provider error, unparseable verifier output, exhausted LLM budget — was silently reported as Tier 3 "model_assisted" with `status: "success"`, identical to a verified answer. It is now labelled `unverified`, scores 0.30 (vs 0.60), and makes the response `status: "partial"`. Enforced by `VerificationResult`'s validator: `model_assisted` now requires a mechanical pass.
 - **Uncited sentences are `unverified`, not Tier 3 "model_assisted".** They remain allowed (transitional text) but are excluded from the confidence score, the tier breakdown, and the success decision; an answer with no cited sentence is `partial`.
@@ -31,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`GET /v1/status` requires an API key.** Health probes remain open.
 
 ### Fixed
+- **A failing later pass discarded a verified answer.** Once one pass was verified, a rewrite or re-retrieval that failed — exhausted LLM budget, a provider error, every search erroring — failed the whole request (HTTP 429/500), and a rewrite on which the synthesizer declared the query unanswerable turned the response `unanswerable`. The run now halts and returns the best verified pass (usually `status: "partial"`), audited as `pipeline_halted_best_pass_returned` and reported as `pipeline_stats.halt_reason`. Failures before the first verified pass still return 429/500.
+- **Transient provider failures were not retried.** One rate-limit or overloaded response failed a synthesis pass or left a citation unverified. `call_llm` now retries rate limits, timeouts, dropped connections, and 5xx (`AXIOM_LLM_MAX_RETRIES`, default 2) with jittered backoff that honours `Retry-After` (capped by `AXIOM_LLM_RETRY_MAX_WAIT_SECONDS`). A retried call consumes one unit of per-request budget; retries are counted in `axiom_llm_retries_total`.
 - CORS now allows `DELETE`, so browser clients can call `DELETE /v1/documents/{id}`.
 - **Audit trails leaked across tenants.** Any API key could list, read, and overwrite (via a reused `request_id`) another key's audit trails. Trails are now scoped to the producing key.
 - **Budget exhaustion returned HTTP 500 instead of 429.** The synthesizer wrapped `LLMBudgetExceededError` in a `RuntimeError`.
