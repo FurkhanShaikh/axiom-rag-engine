@@ -21,6 +21,7 @@ from axiom_rag_engine.audit_store import AuditStore
 from axiom_rag_engine.cache import CacheBackend
 from axiom_rag_engine.config.settings import Settings
 from axiom_rag_engine.corpus.store import CorpusStore
+from axiom_rag_engine.spend import MemorySpendLedger, SpendLedger
 
 
 @dataclass
@@ -43,6 +44,9 @@ class AppServices:
     # hammer Redis or SQLite (see api.routes.ops).
     readiness_checks: dict[str, str] = field(default_factory=dict)
     readiness_checked_at: float = 0.0
+    # Per-key daily LLM spend (AXIOM_KEY_DAILY_BUDGET_USD): Redis-backed when
+    # the cache is, else per process.
+    spend_ledger: SpendLedger = field(default_factory=MemorySpendLedger)
 
     def run_config(self) -> dict[str, Any] | None:
         """LangGraph run config carrying this app's search backend, if any."""

@@ -134,6 +134,18 @@ CACHE_ERRORS = Counter(
     "Response-cache backend errors (each degrades to a miss or a skipped write)",
     ["op"],
 )
+# key_id is a 12-hex-char hash of a configured API key: bounded by the number
+# of keys the operator configured.
+KEY_SPEND_USD = Counter(
+    "axiom_key_spend_usd_total",
+    "LLM spend in USD by API key (best-effort via litellm.completion_cost)",
+    ["key_id"],
+)
+KEY_BUDGET_REJECTIONS = Counter(
+    "axiom_key_budget_rejections_total",
+    "Requests refused because the API key reached AXIOM_KEY_DAILY_BUDGET_USD",
+    ["key_id"],
+)
 EMBEDDING_INPUTS = Counter(
     "axiom_embedding_inputs_total",
     "Texts sent for embedding, by model",

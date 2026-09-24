@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +24,8 @@ from axiom_rag_engine.config.logging import request_id_ctx
 from axiom_rag_engine.config.observability import (
     CACHE_HITS,
     CACHE_MISSES,
+    KEY_BUDGET_REJECTIONS,
+    KEY_SPEND_USD,
     LLM_CALLS_PER_REQUEST,
     PIPELINE_DURATION,
     PIPELINE_HALTS,
@@ -40,6 +43,7 @@ from axiom_rag_engine.graph import (
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
 from axiom_rag_engine.models import AxiomRequest, AxiomResponse
 from axiom_rag_engine.services import AppServices
+from axiom_rag_engine.spend import seconds_until_utc_midnight, utc_day
 from axiom_rag_engine.state import GraphState, make_initial_state
 from axiom_rag_engine.utils.llm import (
     LLMBudgetExceededError,
@@ -248,6 +252,63 @@ def _record_outcome_metrics(response: AxiomResponse, graph_result: dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Per-key daily spend (AXIOM_KEY_DAILY_BUDGET_USD)
+# ---------------------------------------------------------------------------
+
+
+def _key_id(api_key: str | None) -> str:
+    """Short, non-reversible key identity for spend totals and metric labels
+    (bounded: one value per configured key)."""
+    return audit_owner(api_key)[:12]
+
+
+async def _over_daily_budget(services: AppServices, api_key: str | None) -> JSONResponse | None:
+    """A 429 for a key already at its daily cap, before any model is called."""
+    cap = services.settings.key_daily_budget_usd
+    if not cap or not api_key:
+        return None
+    key_id = _key_id(api_key)
+    spent = await services.spend_ledger.spent(key_id, utc_day())
+    if spent < cap:
+        return None
+    KEY_BUDGET_REJECTIONS.labels(key_id=key_id).inc()
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": str(seconds_until_utc_midnight())},
+        content={
+            "detail": (
+                f"This API key has used its daily LLM budget (${cap:.2f}, "
+                "AXIOM_KEY_DAILY_BUDGET_USD); it resets at 00:00 UTC."
+            )
+        },
+    )
+
+
+async def _charge(services: AppServices, api_key: str | None) -> None:
+    """Add this request's LLM cost so far to its key's daily total."""
+    if not api_key:
+        return
+    usd = float(get_llm_usage_snapshot().get("cost_usd") or 0.0)
+    if usd <= 0:
+        return
+    key_id = _key_id(api_key)
+    KEY_SPEND_USD.labels(key_id=key_id).inc(usd)
+    if services.settings.key_daily_budget_usd:
+        await services.spend_ledger.add(key_id, utc_day(), usd)
+
+
+async def _charged(
+    frames: AsyncIterator[str], services: AppServices, api_key: str | None
+) -> AsyncIterator[str]:
+    """Yield ``frames``, then charge the run — also when the client disconnects."""
+    try:
+        async for frame in frames:
+            yield frame
+    finally:
+        await _charge(services, api_key)
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -325,6 +386,9 @@ async def synthesize(
         REQUESTS_BY_STATUS.labels(status=cached.status).inc()
         return JSONResponse(content=cached.model_dump())
     CACHE_MISSES.inc()
+    refused = await _over_daily_budget(services, _api_key)
+    if refused is not None:
+        return refused
 
     # Initialize the per-request LLM call budget. The mutable dict stored in the
     # ContextVar is shared by all asyncio tasks spawned from this coroutine.
@@ -379,6 +443,9 @@ async def synthesize(
         return _failed(504, exc)
     except Exception as exc:
         return _failed(500, exc)
+    finally:
+        # Every run is charged: failed, cancelled and timed-out runs cost money too.
+        await _charge(services, _api_key)
 
     response = marshal_response(
         payload.request_id,
@@ -431,6 +498,9 @@ async def synthesize_stream(
         REQUESTS_BY_STATUS.labels(status=cached.status).inc()
     else:
         CACHE_MISSES.inc()
+        refused = await _over_daily_budget(services, _api_key)
+        if refused is not None:
+            return refused
         reset_llm_budget()
 
     started = time.monotonic()
@@ -462,17 +532,18 @@ async def synthesize_stream(
             owner=audit_owner(_api_key),
         )
 
+    frames = stream_pipeline(
+        payload=payload,
+        engine=services.engine,
+        initial_state=initial_state,
+        cached_response=cached,
+        on_complete=_on_complete,
+        run_config=services.run_config(),
+        deadline_seconds=services.settings.request_deadline_seconds,
+        on_error=_on_error,
+    )
     return StreamingResponse(
-        stream_pipeline(
-            payload=payload,
-            engine=services.engine,
-            initial_state=initial_state,
-            cached_response=cached,
-            on_complete=_on_complete,
-            run_config=services.run_config(),
-            deadline_seconds=services.settings.request_deadline_seconds,
-            on_error=_on_error,
-        ),
+        frames if cached is not None else _charged(frames, services, _api_key),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

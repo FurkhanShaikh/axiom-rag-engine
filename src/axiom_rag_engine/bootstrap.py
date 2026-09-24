@@ -24,6 +24,7 @@ from axiom_rag_engine.config.settings import Settings
 from axiom_rag_engine.corpus.store import CorpusStore
 from axiom_rag_engine.graph import build_axiom_graph
 from axiom_rag_engine.services import AppServices
+from axiom_rag_engine.spend import MemorySpendLedger, RedisSpendLedger, SpendLedger
 
 logger = logging.getLogger("axiom_rag_engine")
 
@@ -232,6 +233,13 @@ def build_cache(settings: Settings) -> CacheBackend:
     )
 
 
+def build_spend_ledger(cache: CacheBackend) -> SpendLedger:
+    """Share per-key spend through the cache's Redis when there is one."""
+    if isinstance(cache, RedisCacheBackend):
+        return RedisSpendLedger(cache.client)
+    return MemorySpendLedger()
+
+
 def build_corpus_store(settings: Settings) -> CorpusStore | None:
     """Open the corpus store when AXIOM_CORPUS_DB_PATH is set, else return None.
 
@@ -384,10 +392,11 @@ def build_services(settings: Settings, *, search_backend: Any = None) -> AppServ
     engine = build_axiom_graph()
     logger.info("Axiom Engine graph compiled and ready.")
 
+    cache = build_cache(settings)
     return AppServices(
         settings=settings,
         engine=engine,
-        cache=build_cache(settings),
+        cache=cache,
         audit_store=audit_store,
         corpus_store=corpus_store,
         search_backend=backend,
@@ -396,4 +405,5 @@ def build_services(settings: Settings, *, search_backend: Any = None) -> AppServ
         default_verifier_model=verif_model,
         started_at=time.time(),
         version=VERSION,
+        spend_ledger=build_spend_ledger(cache),
     )

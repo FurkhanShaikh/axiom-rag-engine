@@ -120,6 +120,11 @@ class RedisCacheBackend:
         self._redis = client
         self.ttl = ttl_seconds
 
+    @property
+    def client(self) -> Any:
+        """The underlying ``redis.asyncio`` client (shared by the spend ledger)."""
+        return self._redis
+
     def _prefixed(self, key: str) -> str:
         return f"{self._PREFIX}{key}"
 

@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — operational metrics (OBS-3)
 - New Prometheus series: `axiom_rewrite_passes_total`, `axiom_re_retrievals_total`, `axiom_pipeline_halts_total{reason}`, `axiom_llm_calls_per_request` (histogram), `axiom_llm_budget_exhausted_total{cap}`, `axiom_synthesizer_parse_failures_total`, `axiom_search_failures_total{backend}`, `axiom_sources_by_content_mode_total{mode}`, `axiom_rate_limit_rejections_total`, `axiom_cache_errors_total{op}` (Redis errors were only logged) and `axiom_embedding_inputs_total{model}`. Labels are bounded (fixed values, backend class names, `safe_model_label`). The Grafana dashboard gains repair-loop, calls-per-request, failures and snippet-share panels.
 
+### Added — per-key spending cap (API-7)
+- **`AXIOM_KEY_DAILY_BUDGET_USD` caps each API key's daily LLM spend.** Cost is summed per key per UTC day — failed, cancelled and timed-out runs included, stream or JSON — and a key at its cap is refused with 429 and `Retry-After` (until 00:00 UTC) before any model is called. Cache hits are free and still served. Totals are shared through Redis when the cache uses it (per process otherwise, or while Redis is unreachable). New metrics: `axiom_key_spend_usd_total{key_id}` and `axiom_key_budget_rejections_total{key_id}` (`key_id` is a short hash of the key). Costs come from LiteLLM, so models it cannot price count as $0. Document ingestion (admin keys only) is not capped.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

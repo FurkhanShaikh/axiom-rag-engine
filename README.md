@@ -76,6 +76,7 @@ resolved configuration.
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | _(empty)_ | Provider keys, read by LiteLLM. |
 | `OPENROUTER_API_KEY` | _(empty)_ | OpenRouter key: one key for many vendors' models (`openrouter/<vendor>/<model>`). With no Anthropic or OpenAI key, startup uses `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (`openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (`openrouter/openai/gpt-4o-mini`). |
 | `AXIOM_ALLOWED_SYNTHESIZER_MODELS` | _(empty)_ | Synthesizer models callers may request besides the default when auth is required (others get 422). The verifier is always server-controlled when auth is required. |
+| `AXIOM_KEY_DAILY_BUDGET_USD` | `0` | Daily LLM spend cap per API key (UTC days). A key at its cap gets 429 with `Retry-After` until 00:00 UTC, before any model is called; failed and cancelled runs count. Cost is LiteLLM's estimate, so models it cannot price (Ollama) count as $0. Per-key spend is exported as `axiom_key_spend_usd_total{key_id}`. `0` = no cap. |
 | `AXIOM_LLM_MAX_RETRIES` | `2` | Retries for transient provider failures (rate limit, timeout, 5xx) per LLM call. |
 | `AXIOM_LLM_TIMEOUT_SECONDS` | `120` | Timeout for one LLM call. Raise it for slow local models. |
 | `AXIOM_REQUEST_DEADLINE_SECONDS` | `300` | Wall-clock limit per pipeline run. On expiry after a verified pass that pass is returned (`partial`); before one, HTTP 504. `0` disables. |
@@ -478,6 +479,7 @@ with the `redis` extra installed):
 |---|---|
 | Response cache | Yes, through Redis |
 | Rate limits (`AXIOM_RATE_LIMIT`, `AXIOM_STREAM_RATE_LIMIT`) | Yes, through Redis. If Redis is unreachable, each replica counts on its own until it recovers. Without Redis, N replicas allow N times the rate. |
+| Per-key daily spend (`AXIOM_KEY_DAILY_BUDGET_USD`) | Yes, through Redis (falls back to per-process totals while Redis is unreachable). |
 | LLM concurrency limits (`AXIOM_MAX_CONCURRENT_LLM`, `AXIOM_MAX_CONCURRENT_VERIFIER_LLM`) | No: per process. Divide the provider's limit by the replica count. |
 | Audit trails (`GET /v1/audits/{id}`) | No: a trail is only on the replica that served the request. Use `AXIOM_LOG_AUDIT_EVENTS=true` to ship them to your log pipeline. |
 | Corpus (SQLite) | No: one file per replica. Run a single writer (one replica that receives ingestion) or serve corpus retrieval from one replica; replicas sharing a file over a network filesystem is not supported. |

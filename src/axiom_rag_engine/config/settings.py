@@ -359,6 +359,15 @@ class Settings(BaseSettings):
         ge=0,
         description="Hard cap on total LLM tokens per request. 0 = unlimited.",
     )
+    key_daily_budget_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Daily LLM spend cap per API key in USD (UTC days). A key at its cap is "
+            "refused with 429 until midnight UTC. Shared across replicas via Redis "
+            "when configured. Models LiteLLM cannot price count as $0. 0 = no cap."
+        ),
+    )
     max_concurrent_llm: int = Field(
         default=5,
         ge=1,
