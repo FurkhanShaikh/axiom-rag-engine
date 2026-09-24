@@ -298,7 +298,8 @@ async def synthesize(
     Accept an AxiomRequest, execute the LangGraph DAG, and return a fully
     validated AxiomResponse with tier breakdown and confidence score.
 
-    Pipeline errors return HTTP 500, budget exhaustion HTTP 429, and a request
+    Pipeline errors return HTTP 500, budget exhaustion before any verified pass
+    HTTP 422 (not retryable: the same request would exhaust it again), and a request
     deadline that expires before any verified pass HTTP 504 (one that expires
     later returns the best verified pass); successful, partial, and unanswerable
     results return HTTP 200. If the client
@@ -324,7 +325,9 @@ async def synthesize(
     reset_llm_budget()
     progress = PipelineProgress(initial_state)
 
-    def _failed(status_code: int, exc: Exception) -> JSONResponse:
+    def _failed(
+        status_code: int, exc: Exception, public_message: str | None = None
+    ) -> JSONResponse:
         """Error response for a failed run, keeping the trail of how far it got."""
         REQUESTS_BY_STATUS.labels(status="error").inc()
         usage = get_llm_usage_snapshot()
@@ -336,7 +339,7 @@ async def synthesize(
             usage_snapshot=usage,
             owner=audit_owner(_api_key),
         )
-        error_resp = make_error_response(payload.request_id, exc, usage)
+        error_resp = make_error_response(payload.request_id, exc, usage, public_message)
         return JSONResponse(status_code=status_code, content=error_resp.model_dump())
 
     try:
@@ -357,7 +360,15 @@ async def synthesize(
         # 499 (client closed request): nobody reads it, but logs show why.
         return Response(status_code=499)
     except LLMBudgetExceededError as exc:
-        return _failed(429, exc)
+        # 422, not 429: the same request would exhaust the same budget again,
+        # and clients and proxies retry 429s. (After a verified pass the run
+        # already returns that pass with 200.)
+        return _failed(
+            422,
+            exc,
+            "The request exhausted its LLM budget before any answer was verified "
+            "(AXIOM_MAX_LLM_CALLS_PER_REQUEST / AXIOM_MAX_TOKENS_PER_REQUEST).",
+        )
     except PipelineDeadlineError as exc:
         return _failed(504, exc)
     except Exception as exc:

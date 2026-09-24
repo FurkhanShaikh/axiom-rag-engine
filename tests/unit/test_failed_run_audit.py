@@ -81,7 +81,7 @@ def test_pipeline_error_keeps_the_trail() -> None:
 def test_budget_exhaustion_keeps_the_trail() -> None:
     app = _app(max_llm_calls_per_request=1)
     with TestClient(app) as client, patch("litellm.acompletion", side_effect=_not_json):
-        assert client.post("/v1/synthesize", json=_body("broke")).status_code == 429
+        assert client.post("/v1/synthesize", json=_body("broke")).status_code == 422
         entry = _trail(client, "broke")
     assert _failure(entry)["error_type"] == "LLMBudgetExceededError"
 

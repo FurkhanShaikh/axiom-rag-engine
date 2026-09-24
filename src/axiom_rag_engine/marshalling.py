@@ -93,10 +93,14 @@ def make_error_response(
     request_id: str,
     error: Exception,
     usage_snapshot: dict[str, Any] | None = None,
+    public_message: str | None = None,
 ) -> AxiomResponse:
     """
     Build a structured error response matching the AxiomResponse schema.
     Category 1 errors (architecture §7): unrecoverable system failures.
+
+    ``public_message`` replaces the generic message when the cause is safe and
+    useful for the caller to see (a configured limit, not an internal error).
     """
     # Log full detail server-side; return only a generic message to the client.
     logger.error(
@@ -115,6 +119,7 @@ def make_error_response(
             tier_breakdown=TierBreakdown(),
         ),
         final_response=[],
-        error_message=f"Internal pipeline error — see server logs for request {request_id}.",
+        error_message=public_message
+        or f"Internal pipeline error — see server logs for request {request_id}.",
         usage=_usage_summary_from_snapshot(usage_snapshot),
     )
