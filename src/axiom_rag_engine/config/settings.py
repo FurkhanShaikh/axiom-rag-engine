@@ -127,8 +127,9 @@ class Settings(BaseSettings):
     )
 
     # ── LLM defaults ─────────────────────────────────────────────────────
-    # These doubles as the "operator did not choose a model" sentinel — see
-    # resolve_llm_defaults in bootstrap.py, which reads them via model_fields.
+    # When these are not set explicitly (env, .env or constructor), startup
+    # auto-selects models from the providers it finds — see
+    # resolve_llm_defaults in bootstrap.py, which checks model_fields_set.
     default_synthesizer_model: str = Field(
         default="claude-opus-4-8",
         description="Default synthesizer LiteLLM model ID.",
@@ -404,6 +405,9 @@ class Settings(BaseSettings):
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-4-turbo",
+            # OpenRouter auto-selected defaults
+            "openrouter/openai/gpt-4o",
+            "openrouter/openai/gpt-4o-mini",
             # Local (prefix-matched)
             "ollama",
         ],
@@ -428,6 +432,25 @@ class Settings(BaseSettings):
         default=None,
         description="OpenAI API key. Presence enables gpt-* model selection.",
         alias="OPENAI_API_KEY",
+    )
+    openrouter_api_key: str | None = Field(
+        default=None,
+        description=(
+            "OpenRouter API key. Presence enables openrouter/* models, and the "
+            "openrouter_* defaults below when no Anthropic or OpenAI key is set."
+        ),
+        alias="OPENROUTER_API_KEY",
+    )
+    openrouter_synthesizer_model: str = Field(
+        default="openrouter/openai/gpt-4o",
+        description="Synthesizer auto-selected when OpenRouter is the only cloud provider.",
+    )
+    openrouter_verifier_model: str = Field(
+        default="openrouter/openai/gpt-4o-mini",
+        description=(
+            "Verifier auto-selected when OpenRouter is the only cloud provider. The "
+            "default is the same model as the OpenAI-key verifier, routed via OpenRouter."
+        ),
     )
 
     # ── Audit ────────────────────────────────────────────────────────────

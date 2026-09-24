@@ -128,7 +128,8 @@ def _render_config_text(settings: Any, redacted: dict[str, Any]) -> str:
         "Source legend: [env] = exported; [.env] = dotenv file; [default] = Settings default."
     )
     lines.append(
-        "TAVILY_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY are read by vendor SDKs and not shown."
+        "TAVILY_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY are read "
+        "by vendor SDKs and not shown."
     )
     return "\n".join(lines) + "\n"
 

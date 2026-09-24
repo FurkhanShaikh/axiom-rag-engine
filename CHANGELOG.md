@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — OpenRouter provider
+- **`OPENROUTER_API_KEY` is a first-class provider key.** With no Anthropic or OpenAI key, startup auto-selects `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (default `openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (default `openrouter/openai/gpt-4o-mini`, the same model as the OpenAI-key verifier). The key counts as an available provider for production's fail-closed check, is pushed to LiteLLM from `.env`, and is redacted by `check-config`.
+
+### Fixed — explicit model configuration
+- **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
+
 ### Changed — synthesis
 - **Tier 2 is reachable.** Chunk headers now show each chunk's source domain (sanitized to hostname characters), and the synthesizer is asked to cite every chunk from a different source that states a fact (up to 3, each with its own verbatim quote). On 100 ASQA questions (local qwen3.5:9b) sentences citing ≥ 2 domains went from 0.6% to 23.5% and Tier 2 from 0% to 20%, with Tier 2 sentences judged as well supported as Tier 3 (0.98 vs 0.95). See BENCHMARKS.md → Tier calibration.
 

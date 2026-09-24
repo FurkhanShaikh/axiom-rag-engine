@@ -71,8 +71,10 @@ resolved configuration.
 | `AXIOM_API_KEYS` | _(empty)_ | Comma-separated API keys. Required when env != development. |
 | `AXIOM_ADMIN_API_KEYS` | _(empty)_ | Keys allowed to ingest and delete corpus documents when auth is required (they are also valid API keys). Empty = corpus writes are refused. |
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
-| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
-| `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
+| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. If not set explicitly, startup picks one from the available providers: Anthropic → OpenAI → OpenRouter → Ollama. |
+| `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. If not set explicitly, startup picks one: OpenAI → Anthropic → OpenRouter → Ollama. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | _(empty)_ | Provider keys, read by LiteLLM. |
+| `OPENROUTER_API_KEY` | _(empty)_ | OpenRouter key: one key for many vendors' models (`openrouter/<vendor>/<model>`). With no Anthropic or OpenAI key, startup uses `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (`openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (`openrouter/openai/gpt-4o-mini`). |
 | `AXIOM_ALLOWED_SYNTHESIZER_MODELS` | _(empty)_ | Synthesizer models callers may request besides the default when auth is required (others get 422). The verifier is always server-controlled when auth is required. |
 | `AXIOM_LLM_MAX_RETRIES` | `2` | Retries for transient provider failures (rate limit, timeout, 5xx) per LLM call. |
 | `AXIOM_LLM_TIMEOUT_SECONDS` | `120` | Timeout for one LLM call. Raise it for slow local models. |
