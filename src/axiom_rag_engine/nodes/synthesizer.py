@@ -27,7 +27,7 @@ from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.models import SynthesizerOutput
 from axiom_rag_engine.schemas import SYNTHESIZER_SCHEMA
 from axiom_rag_engine.state import GraphState
-from axiom_rag_engine.utils.audit import make_audit_event
+from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 from axiom_rag_engine.utils.llm import LLMBudgetExceededError, call_llm, parse_json_object
 
 _audit = partial(make_audit_event, "synthesizer")
@@ -436,10 +436,11 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
         except Exception as exc:
             # Category 2: LLM API failure — record and surface immediately.
             last_error = exc
+            logger.warning("Synthesizer LLM call failed (attempt %d): %r", attempt, exc)
             audit.append(
                 _audit(
                     "synthesizer_api_error",
-                    {"attempt": attempt, "error": str(exc)},
+                    {"attempt": attempt, **error_fields(exc)},
                 )
             )
             break

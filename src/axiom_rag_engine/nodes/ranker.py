@@ -22,7 +22,7 @@ from typing import Any
 
 from axiom_rag_engine.config.settings import get_settings
 from axiom_rag_engine.state import GraphState
-from axiom_rag_engine.utils.audit import make_audit_event
+from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 from axiom_rag_engine.utils.text import is_unspaced_char
 
 _audit = partial(make_audit_event, "ranker")
@@ -285,7 +285,7 @@ async def _apply_hybrid_fusion(
             type(exc).__name__,
             exc,
         )
-        audit.append(_audit("ranker_dense_error", {"model": embedding_model, "error": str(exc)}))
+        audit.append(_audit("ranker_dense_error", {"model": embedding_model, **error_fields(exc)}))
         return False
 
     dense = [cosine(query_vec, cv) for cv in chunk_vecs]

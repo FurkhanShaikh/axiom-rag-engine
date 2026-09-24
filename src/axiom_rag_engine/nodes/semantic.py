@@ -52,7 +52,7 @@ from axiom_rag_engine.schemas import (
     SEMANTIC_VERDICT_SCHEMA,
 )
 from axiom_rag_engine.state import GraphState
-from axiom_rag_engine.utils.audit import make_audit_event
+from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 from axiom_rag_engine.utils.llm import call_llm, parse_json_object
 
 _audit = partial(make_audit_event, "semantic_verifier")
@@ -451,7 +451,9 @@ async def _apply_corroboration_gate(
             sentence_id,
             exc,
         )
-        audit.append(_audit("corroboration_error", {"sentence_id": sentence_id, "error": str(exc)}))
+        audit.append(
+            _audit("corroboration_error", {"sentence_id": sentence_id, **error_fields(exc)})
+        )
         return _tier3_not_corroborated(f"Corroboration unavailable: {type(exc).__name__}")
 
     audit.append(
@@ -600,7 +602,9 @@ async def _apply_contradiction_gate(
             provisional.tier,
             exc,
         )
-        audit.append(_audit("contradiction_error", {"sentence_id": sentence_id, "error": str(exc)}))
+        audit.append(
+            _audit("contradiction_error", {"sentence_id": sentence_id, **error_fields(exc)})
+        )
         return provisional
 
     audit.append(
@@ -941,7 +945,7 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                                 {
                                     "citation_id": citation.citation_id,
                                     "chunk_id": citation.chunk_id,
-                                    "error": str(result),
+                                    **error_fields(result),
                                 },
                             )
                         )
