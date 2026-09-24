@@ -256,15 +256,28 @@ class PipelineProgress:
 
     def __init__(self, state: GraphState) -> None:
         self.state: GraphState = state
+        self.node: str | None = None  # the node running now (last started)
 
 
 _PROGRESS_KEY = "axiom_progress"
 
 
-def _record_progress(config: Any, state: GraphState) -> None:
+def _record_progress(config: Any, state: GraphState, node: str) -> None:
     progress = ((config or {}).get("configurable") or {}).get(_PROGRESS_KEY)
     if isinstance(progress, PipelineProgress):
         progress.state = state
+        progress.node = node
+
+
+def with_failure_event(
+    state: dict[str, Any], node: str | None, exc: BaseException
+) -> dict[str, Any]:
+    """``state`` plus a terminal ``pipeline_failed`` audit event, so a failed
+    run's trail records how far it got and what stopped it (error type only)."""
+    event = make_audit_event(
+        "pipeline", "pipeline_failed", {"failed_node": node, **error_fields(exc)}
+    )
+    return {**state, "audit_trail": [*(state.get("audit_trail") or []), event]}
 
 
 def finish_with_best_pass(state: GraphState, reason: str) -> dict[str, Any] | None:
@@ -285,21 +298,23 @@ async def run_pipeline(
     initial_state: GraphState,
     run_config: dict[str, Any] | None,
     deadline_seconds: float,
+    progress: PipelineProgress | None = None,
 ) -> dict[str, Any]:
     """Run the graph under a wall-clock deadline (0 disables it).
 
     When the deadline expires after a verified pass, the best pass is returned
-    as a halted run (``halt_reason="deadline"``) instead of losing it.
+    as a halted run (``halt_reason="deadline"``) instead of losing it. Pass
+    ``progress`` to see how far a failed run got.
 
     Raises:
         PipelineDeadlineError: the deadline expired before any verified pass.
     """
-    if deadline_seconds <= 0:
-        return cast(dict[str, Any], await engine.ainvoke(initial_state, config=run_config))
-
-    progress = PipelineProgress(initial_state)
+    progress = progress or PipelineProgress(initial_state)
     config = dict(run_config or {})
     config["configurable"] = {**(config.get("configurable") or {}), _PROGRESS_KEY: progress}
+    if deadline_seconds <= 0:
+        return cast(dict[str, Any], await engine.ainvoke(initial_state, config=config))
+
     deadline = asyncio.timeout(deadline_seconds)
     try:
         async with deadline:
@@ -327,7 +342,7 @@ def _timed_node(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
     # parameter; the wrapper declares it and forwards it to nodes that want it
     # (the retriever reads its search backend from it).
     async def _wrapper(state: GraphState, config: RunnableConfig) -> dict:
-        _record_progress(config, state)
+        _record_progress(config, state, name)
         start = time.monotonic()
         result = await _call_node(fn, state, config)
         NODE_DURATION.labels(node=name).observe(time.monotonic() - start)
