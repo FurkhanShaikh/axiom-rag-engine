@@ -70,6 +70,10 @@ class GraphState(TypedDict):
     # Number of times retrieval has been retried due to persistent failures.
     retrieval_retry_count: int
     mechanical_results: dict[str, dict]
+    # Completed semantic verdicts for this request, keyed by
+    # semantic._verdict_key (claim, chunk, quote, model). Reused by later
+    # passes so unchanged sentences are not re-judged; never reset.
+    semantic_verdicts: dict[str, dict]
 
     # ------------------------------------------------------------------
     # OUTPUT STATE
@@ -123,6 +127,7 @@ def make_initial_state(
         loop_count=0,
         retrieval_retry_count=0,
         mechanical_results={},
+        semantic_verdicts={},
         final_sentences=[],
         best_final_sentences=[],
         best_pass_rank=None,

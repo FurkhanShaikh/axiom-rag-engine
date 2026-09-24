@@ -310,5 +310,8 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
         "pending_rewrite_count": pending_count,
         "loop_count": new_loop_count,
         "mechanical_results": mechanical_results,
+        "semantic_verdicts": semantic_result.get(
+            "semantic_verdicts", state.get("semantic_verdicts") or {}
+        ),
         "audit_trail": all_audit,
     }
