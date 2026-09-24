@@ -117,7 +117,7 @@ class Settings(BaseSettings):
 
     # ── LLM defaults ─────────────────────────────────────────────────────
     # These doubles as the "operator did not choose a model" sentinel — see
-    # _resolve_llm_defaults in main.py, which reads them via model_fields.
+    # resolve_llm_defaults in bootstrap.py, which reads them via model_fields.
     default_synthesizer_model: str = Field(
         default="claude-opus-4-8",
         description="Default synthesizer LiteLLM model ID.",
@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     default_verifier_model: str = Field(
         default="gpt-4o-mini",
         description="Default verifier LiteLLM model ID.",
+    )
+    allowed_synthesizer_models: CommaSepList = Field(
+        default_factory=list,
+        description=(
+            "Synthesizer models a caller may request via models.synthesizer when auth "
+            "is required, besides the server default. Anything else is rejected with "
+            "422. The verifier is always server-controlled when auth is required."
+        ),
     )
 
     # ── Rate limiting / response cache ───────────────────────────────────

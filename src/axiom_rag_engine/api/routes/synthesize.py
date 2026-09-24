@@ -8,7 +8,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from slowapi import Limiter
 
@@ -78,20 +78,47 @@ def effective_pipeline_config(payload: AxiomRequest, settings: Settings) -> dict
     return effective
 
 
+def effective_models_config(payload: AxiomRequest, services: AppServices) -> dict[str, Any]:
+    """The models this request runs on, under server model policy.
+
+    When auth is required, the verifier is server policy — it grants the tiers,
+    so a caller must not pick a lenient judge for its own answers — and a caller
+    may choose only a synthesizer the operator allows (the server default or
+    AXIOM_ALLOWED_SYNTHESIZER_MODELS). With auth disabled the caller is the
+    operator, so its choices are honoured. Omitted models fall back to the
+    startup-detected defaults (which account for available API keys).
+
+    Raises:
+        HTTPException: 422 when the requested synthesizer is not allowed.
+    """
+    settings = services.settings
+    synthesizer = payload.models.synthesizer or services.default_synthesizer_model
+    verifier = payload.models.verifier or services.default_verifier_model
+    if not settings.auth_required():
+        return {"synthesizer": synthesizer, "verifier": verifier}
+
+    if verifier != services.default_verifier_model:
+        logger.warning(
+            "Ignoring caller verifier=%s for request %s; the verifier is server policy.",
+            verifier,
+            payload.request_id,
+        )
+    allowed = {services.default_synthesizer_model, *settings.allowed_synthesizer_models}
+    if synthesizer not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Synthesizer model {synthesizer!r} is not allowed on this server.",
+        )
+    return {"synthesizer": synthesizer, "verifier": services.default_verifier_model}
+
+
 def _initial_state(payload: AxiomRequest, services: AppServices) -> GraphState:
     """Build the graph input from the request and server policy (both endpoints)."""
-    models_config = payload.models.model_dump()
-    # Prefer the caller's explicit choice; fall back to the startup-detected
-    # defaults (which already account for available API keys).
-    if not models_config.get("synthesizer"):
-        models_config["synthesizer"] = services.default_synthesizer_model
-    if not models_config.get("verifier"):
-        models_config["verifier"] = services.default_verifier_model
     return make_initial_state(
         request_id=payload.request_id,
         user_query=payload.user_query,
         app_config=effective_app_config(payload, services.settings),
-        models_config=models_config,
+        models_config=effective_models_config(payload, services),
         pipeline_config=effective_pipeline_config(payload, services.settings),
     )
 
@@ -106,10 +133,12 @@ def cache_key(
     api_key: str | None,
     app_config: dict[str, Any],
     pipeline_config: dict[str, Any],
+    models_config: dict[str, Any],
 ) -> str:
     """
     SHA-256 of the request fields that shape the response body, namespaced by
-    a hash of the caller's API key.
+    a hash of the caller's API key. Configs are the *effective* ones (after
+    server policy), so an ignored override never splits or aliases entries.
 
     Namespacing prevents cross-tenant cache poisoning: two callers with different
     API keys cannot serve each other's cached results even when all other fields
@@ -120,7 +149,7 @@ def cache_key(
         {
             "ns": key_namespace,
             "query": payload.user_query,
-            "models": payload.models.model_dump(),
+            "models": models_config,
             "pipeline": pipeline_config,
             "app": app_config,
             "include_debug": payload.include_debug,
@@ -190,7 +219,11 @@ async def synthesize(
     initial_state = _initial_state(payload, services)
 
     key = cache_key(
-        payload, _api_key, initial_state["app_config"], initial_state["pipeline_config"]
+        payload,
+        _api_key,
+        initial_state["app_config"],
+        initial_state["pipeline_config"],
+        initial_state["models_config"],
     )
     cached = await _get_cached(services, key, payload.request_id)
     if cached is not None:
@@ -261,7 +294,11 @@ async def synthesize_stream(
     initial_state = _initial_state(payload, services)
 
     key = cache_key(
-        payload, _api_key, initial_state["app_config"], initial_state["pipeline_config"]
+        payload,
+        _api_key,
+        initial_state["app_config"],
+        initial_state["pipeline_config"],
+        initial_state["models_config"],
     )
     cached = await _get_cached(services, key, payload.request_id)
     if cached is not None:
