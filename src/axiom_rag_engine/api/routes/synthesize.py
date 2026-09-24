@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -230,9 +231,14 @@ async def _set_cached(services: AppServices, key: str, response: AxiomResponse) 
 
 def _record_outcome_metrics(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
     REQUESTS_BY_STATUS.labels(status=response.status).inc()
-    for sentence in graph_result.get("final_sentences", []):
-        tier = sentence.get("verification", {}).get("tier", 3)
-        TIER_ASSIGNMENTS.labels(tier=str(tier)).inc()
+    # Claims only, like the response's tier_breakdown: uncited sentences carry
+    # no checked quote and used to be counted here as tier 3.
+    for sentence in response.final_response:
+        if sentence.is_cited:
+            verification = sentence.verification
+            TIER_ASSIGNMENTS.labels(
+                tier=str(verification.tier), label=verification.tier_label
+            ).inc()
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +416,11 @@ async def synthesize_stream(
         CACHE_MISSES.inc()
         reset_llm_budget()
 
+    started = time.monotonic()
+
     async def _on_complete(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
         """Post-pipeline housekeeping: metrics, audit, cache."""
+        PIPELINE_DURATION.observe(time.monotonic() - started)
         _record_outcome_metrics(response, graph_result)
         persist_and_emit_audit(
             services,
@@ -425,6 +434,7 @@ async def synthesize_stream(
 
     async def _on_error(failed_state: dict[str, Any]) -> None:
         """Failed run: count it and keep the trail of how far it got."""
+        PIPELINE_DURATION.observe(time.monotonic() - started)
         REQUESTS_BY_STATUS.labels(status="error").inc()
         persist_and_emit_audit(
             services,
