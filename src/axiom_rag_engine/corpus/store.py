@@ -21,6 +21,14 @@ The retriever runs search off the event loop (``asyncio.to_thread``), so store
 methods must be safe to call from worker threads. Each call opens its own
 short-lived SQLite connection (a local file open is cheap) rather than sharing
 one across threads, which sidesteps SQLite's per-connection thread affinity.
+The database runs in WAL mode so searches never wait on an ingest, and each
+connection waits up to ``_BUSY_TIMEOUT_SECONDS`` for another writer's lock.
+
+Schema
+------
+The schema version lives in ``PRAGMA user_version``; ``_MIGRATIONS`` upgrades
+older databases in place when the store opens, and a database written by a
+newer build is refused rather than misread.
 """
 
 from __future__ import annotations
@@ -112,29 +120,71 @@ def _content_sha(texts: list[str]) -> str:
 # Store
 # ---------------------------------------------------------------------------
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS documents (
-    doc_id          TEXT PRIMARY KEY,
-    title           TEXT NOT NULL DEFAULT '',
-    source          TEXT NOT NULL DEFAULT '',
-    embedding_model TEXT NOT NULL,
-    content_sha     TEXT NOT NULL,
-    chunk_count     INTEGER NOT NULL,
-    char_count      INTEGER NOT NULL,
-    created_at      TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS chunks (
-    chunk_id    TEXT PRIMARY KEY,
-    doc_id      TEXT NOT NULL,
-    chunk_index INTEGER NOT NULL,
-    text        TEXT NOT NULL,
-    dim         INTEGER NOT NULL,
-    embedding   BLOB NOT NULL,
-    FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
-CREATE INDEX IF NOT EXISTS idx_docs_model ON documents(embedding_model);
-"""
+# Schema migrations, applied in order. The database's version lives in
+# ``PRAGMA user_version``: a database at version N runs ``_MIGRATIONS[N:]``.
+# Version 1 uses IF NOT EXISTS so databases created before versioning (which
+# report version 0 but already have the tables) upgrade in place.
+_MIGRATIONS: tuple[tuple[str, ...], ...] = (
+    # v1 — documents and their embedded chunks.
+    (
+        """CREATE TABLE IF NOT EXISTS documents (
+            doc_id          TEXT PRIMARY KEY,
+            title           TEXT NOT NULL DEFAULT '',
+            source          TEXT NOT NULL DEFAULT '',
+            embedding_model TEXT NOT NULL,
+            content_sha     TEXT NOT NULL,
+            chunk_count     INTEGER NOT NULL,
+            char_count      INTEGER NOT NULL,
+            created_at      TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS chunks (
+            chunk_id    TEXT PRIMARY KEY,
+            doc_id      TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            text        TEXT NOT NULL,
+            dim         INTEGER NOT NULL,
+            embedding   BLOB NOT NULL,
+            FOREIGN KEY (doc_id) REFERENCES documents(doc_id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)",
+        "CREATE INDEX IF NOT EXISTS idx_docs_model ON documents(embedding_model)",
+    ),
+)
+SCHEMA_VERSION = len(_MIGRATIONS)
+
+# How long a connection waits on another writer's lock before failing with
+# "database is locked". WAL mode keeps readers from blocking the writer at all.
+_BUSY_TIMEOUT_SECONDS = 10.0
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring the database up to SCHEMA_VERSION, one transaction per step.
+
+    ``BEGIN IMMEDIATE`` takes the write lock before the version is re-read, so
+    two processes opening the same file cannot both apply a step.
+
+    Raises:
+        RuntimeError: the database was written by a newer build.
+    """
+    while True:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if current > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Corpus database schema v{current} is newer than this build supports "
+                    f"(v{SCHEMA_VERSION}); upgrade axiom-rag-engine."
+                )
+            if current == SCHEMA_VERSION:
+                conn.execute("COMMIT")
+                return
+            for statement in _MIGRATIONS[current]:
+                conn.execute(statement)
+            conn.execute(f"PRAGMA user_version = {current + 1}")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
 
 
 class CorpusStore:
@@ -153,11 +203,15 @@ class CorpusStore:
             Path(self._db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             self._db_path = str(Path(self._db_path).expanduser())
         with closing(self._connect()) as conn:
-            conn.executescript(_SCHEMA)
-            conn.commit()
+            if self._db_path != ":memory:":
+                # Persistent per file: readers no longer block the writer, so a
+                # search during an ingest does not hit "database is locked".
+                conn.execute("PRAGMA journal_mode = WAL")
+            conn.isolation_level = None  # explicit transactions in _migrate
+            _migrate(conn)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
