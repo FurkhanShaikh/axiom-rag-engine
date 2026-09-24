@@ -131,7 +131,10 @@ compatibility, but carries its own label, scores 0.30 instead of 0.60, and any
 or overloaded verifier can no longer produce `status: "success"`. Uncited
 (transitional) sentences are allowed, labelled unverified, and excluded from
 the confidence score and the tier breakdown; an answer made *only* of uncited
-sentences is `partial`.
+sentences is `partial`. An uncited sentence that carries checkable content
+(numbers, or names beyond its first word) reads as a claim nobody checked, so it
+also makes the response `partial`. `confidence_summary` reports
+`uncited_sentences` and `uncited_checkable_sentences`.
 
 Each passing citation also carries `matched_source_text`: the exact text of the
 source the quote matched (original casing and punctuation), so clients can

@@ -377,6 +377,19 @@ class TierBreakdown(BaseModel):
 class ConfidenceSummary(BaseModel):
     overall_score: float = Field(..., ge=0.0, le=1.0)
     tier_breakdown: TierBreakdown
+    uncited_sentences: int = Field(
+        default=0,
+        ge=0,
+        description="Sentences with no citation; nothing in them was checked against a source.",
+    )
+    uncited_checkable_sentences: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Uncited sentences that carry checkable content (numbers or names), so "
+            "they read as claims. Any makes the response status 'partial'."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

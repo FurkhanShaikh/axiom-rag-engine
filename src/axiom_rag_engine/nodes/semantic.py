@@ -52,6 +52,7 @@ from axiom_rag_engine.schemas import (
     CORROBORATION_SCHEMA,
     SEMANTIC_VERDICT_SCHEMA,
 )
+from axiom_rag_engine.scoring import has_checkable_content
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 from axiom_rag_engine.utils.llm import call_llm, parse_json_object
@@ -910,7 +911,11 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
             # quote). They are excluded from the confidence score and from the
             # success decision (scoring.py). No rewrite request is generated.
             sentence_verification = _unverified(
-                "skipped", "Uncited sentence — no source quote was checked."
+                "skipped",
+                "Uncited sentence with checkable content (numbers or names) — "
+                "no source quote was checked."
+                if has_checkable_content(claim_text)
+                else "Uncited sentence — no source quote was checked.",
             )
             final_slots.append(
                 FinalSentence(
