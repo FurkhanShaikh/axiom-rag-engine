@@ -74,6 +74,7 @@ def marshal_response(
                 "chunks_ranked": len(graph_result.get("ranked_chunks", [])),
                 "loop_count": graph_result.get("loop_count", 0),
                 "retrieval_retry_count": graph_result.get("retrieval_retry_count", 0),
+                "halt_reason": graph_result.get("halt_reason"),
             },
         )
 
