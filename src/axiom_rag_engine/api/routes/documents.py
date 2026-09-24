@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response
 
 from axiom_rag_engine.api.auth import verify_api_key
 from axiom_rag_engine.api.deps import Services
+from axiom_rag_engine.config.settings import use_settings
 from axiom_rag_engine.corpus.ingest import IngestionError, extract_text, ingest_text
 from axiom_rag_engine.corpus.store import CorpusStore, DocumentMeta
 from axiom_rag_engine.models import (
@@ -88,6 +89,7 @@ async def _ingest_and_respond(
     source: str,
 ) -> Response:
     """Shared ingest path for the JSON and file-upload endpoints."""
+    use_settings(services.settings)
     store = _corpus_store(services)
     embedding_model = _embedding_model(services)
     if not text.strip():

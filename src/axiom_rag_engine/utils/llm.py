@@ -19,7 +19,7 @@ import re
 import time
 from typing import Any
 
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import current_settings, get_settings
 
 logger = logging.getLogger("axiom_rag_engine.llm")
 
@@ -55,7 +55,7 @@ class LLMBudgetExceededError(RuntimeError):
 
 def reset_llm_budget(max_calls: int | None = None, max_tokens: int | None = None) -> int:
     """Initialize the per-request LLM budgets. Returns the call cap that was set."""
-    settings = get_settings()
+    settings = current_settings()
     cap = max_calls if max_calls is not None else settings.max_llm_calls_per_request
     token_cap = max_tokens if max_tokens is not None else settings.max_tokens_per_request
     _llm_budget_ctx.set(
@@ -220,7 +220,9 @@ def get_llm_semaphore() -> asyncio.Semaphore:
     """Return the shared asyncio.Semaphore for LLM concurrency limiting.
 
     Lazily instantiated so tests / callers can change
-    ``AXIOM_MAX_CONCURRENT_LLM`` via env before the first call.
+    ``AXIOM_MAX_CONCURRENT_LLM`` via env before the first call. Deliberately
+    process-wide (``get_settings``, not the request's): it bounds calls across
+    every app in the process to protect provider rate limits.
     """
     global _llm_semaphore
     if _llm_semaphore is None:
@@ -268,11 +270,11 @@ def build_completion_kwargs(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "timeout": timeout if timeout is not None else get_settings().llm_timeout_seconds,
+        "timeout": timeout if timeout is not None else current_settings().llm_timeout_seconds,
     }
 
     if model.startswith("ollama/"):
-        kwargs["api_base"] = get_settings().ollama_api_base
+        kwargs["api_base"] = current_settings().ollama_api_base
         extra: dict[str, Any] = {}
         # Qwen3 models expose a `think` parameter to suppress chain-of-thought.
         # Other models reject it, so only set it for qwen3/* variants.
@@ -352,7 +354,7 @@ async def _acompletion_with_retry(node: str, model: str, kwargs: dict[str, Any])
 
     from axiom_rag_engine.config.observability import LLM_RETRIES, safe_model_label
 
-    settings = get_settings()
+    settings = current_settings()
     attempt = 0
     while True:
         try:

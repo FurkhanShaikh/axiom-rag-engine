@@ -20,7 +20,7 @@ from collections import Counter
 from functools import partial
 from typing import Any
 
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import current_settings
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 from axiom_rag_engine.utils.text import is_unspaced_char
@@ -511,7 +511,7 @@ async def ranker_node(state: GraphState) -> dict[str, Any]:
     # Hybrid retrieval is opt-in: only when an embedding model is configured and
     # there are at least two chunks to reorder. It reorders by RRF of BM25 and
     # dense cosine; any failure falls back cleanly to the BM25 order below.
-    settings = get_settings()
+    settings = current_settings()
     hybrid_applied = False
     if settings.embedding_model and len(ranked) >= 2:
         hybrid_applied = await _apply_hybrid_fusion(

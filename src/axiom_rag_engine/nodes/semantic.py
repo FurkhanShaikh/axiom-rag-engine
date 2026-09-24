@@ -38,7 +38,7 @@ from typing import Any
 import litellm  # noqa: F401 — module attribute kept so tests can patch litellm.acompletion here
 
 from axiom_rag_engine.config.observability import SEMANTIC_DEGRADATIONS
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import current_settings
 from axiom_rag_engine.models import (
     Citation,
     CitationSource,
@@ -805,7 +805,7 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
     # Cross-source corroboration is a server policy (opt-in). When on, Tier 2
     # requires >=2 distinct sources to independently corroborate the claim; when
     # off, Tier 2 stays "multi-domain coverage" (the honest default).
-    settings = get_settings()
+    settings = current_settings()
     corroboration_enabled: bool = semantic_enabled and settings.corroboration_enabled
     # Cross-source contradiction is a server policy (opt-in). When on, a
     # multi-domain sentence whose sources conflict is surfaced as Tier 6
