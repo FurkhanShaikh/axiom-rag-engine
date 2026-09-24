@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Measured — ranking quality blend (RET-1)
+- `pipeline_retrieval_eval.py --sweep` compares a grid of quality weights with BM25 alone using paired-bootstrap intervals. On SciFact (188 claims) the shipped 0.4 blend never loses a claim and gains two or three; weights up to 0.2 change nothing and 0.8 adds at most one more. The shipped weights stay; the domain-authority half is still unmeasured on web-shaped data (BENCHMARKS.md → Quality-weight sweep).
+
 ### Changed — corpus search speed (COR-5)
 - **Corpus search no longer re-reads every embedding per query.** Decoded vectors are cached per embedding model until the corpus version changes (any ingest or delete, from any process), so a query reads only the version counter and its top-k rows. With the new `vector` extra (numpy) scoring is vectorised: at 10k chunks a search takes 1.8 ms instead of 739 ms (`corpus_eval.py --bench-search`; BENCHMARKS.md). Without numpy the pure-Python path is used, about 2× faster than before.
 

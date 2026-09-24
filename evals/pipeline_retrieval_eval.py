@@ -24,10 +24,16 @@ This eval reproduces the production shape with no keys and no network:
 ``--variant`` compares the production ranking blend with BM25 alone (quality
 weight 0) — the measurement the quality heuristics never had.
 
+``--sweep`` runs a grid of quality weights (0 = BM25 only, 0.4 = shipped) and
+reports each against BM25 alone with paired-bootstrap 95% intervals over the
+same claims. (Domain authority is constant on SciFact, so on this data the
+sweep measures the chunk heuristics.)
+
 Usage:
     uv run python evals/pipeline_retrieval_eval.py --limit 0
     uv run python evals/pipeline_retrieval_eval.py --limit 0 --variant bm25_only
     uv run python evals/pipeline_retrieval_eval.py --limit 0 --gate
+    uv run python evals/pipeline_retrieval_eval.py --limit 0 --sweep
 """
 
 from __future__ import annotations
@@ -173,6 +179,7 @@ async def evaluate(
     pool: int,
     max_ranked: int,
     variant: str,
+    weights: dict[str, float] | None = None,
 ) -> list[PipelineResult]:
     # Explicit settings: an environment's embedding / reranker model must not
     # turn this deterministic BM25 measurement into a hybrid or LLM one.
@@ -182,9 +189,42 @@ async def evaluate(
     results: list[PipelineResult] = []
     for query in queries:
         docs = search_pool(bm25, corpus_text, query, pool)
-        ranked = await rank_with_production(query.text, docs, max_ranked, _VARIANTS[variant])
+        ranked = await rank_with_production(
+            query.text, docs, max_ranked, weights if weights is not None else _VARIANTS[variant]
+        )
         results.append(score(query, ranked, len(docs)))
     return results
+
+
+# Quality weights swept (relevance = 1 - w); 0.4 is the shipped blend.
+_SWEEP_WEIGHTS = (0.0, 0.1, 0.2, 0.4, 0.6, 0.8)
+_SWEEP_METRICS = ("p_at_1", "rr", "evidence_recall")
+
+
+def sweep(limit: int, seed: int, pool: int, max_ranked: int) -> dict[str, dict[str, Any]]:
+    """Each quality weight against BM25 alone, on the same claims."""
+    corpus = reval.load_corpus()
+    queries = reval.load_queries("dev")
+    if limit:
+        rng = random.Random(seed)  # noqa: S311 - reproducible sampling, not crypto
+        queries = rng.sample(queries, min(limit, len(queries)))
+    runs: dict[str, list[PipelineResult]] = {}
+    for w in _SWEEP_WEIGHTS:
+        weights = {"relevance_weight": round(1.0 - w, 4), "quality_weight": w}
+        runs[f"quality={w:g}"] = asyncio.run(
+            evaluate(queries, corpus, pool, max_ranked, "production", weights)
+        )
+    base = runs["quality=0"]
+    report: dict[str, dict[str, Any]] = {}
+    for label, results in runs.items():
+        row: dict[str, Any] = {"summary": summarize(results)}
+        for metric in _SWEEP_METRICS:
+            mean, low, high = gate.paired_bootstrap(
+                [getattr(r, metric) for r in base], [getattr(r, metric) for r in results]
+            )
+            row[metric] = {"diff": round(mean, 4), "ci95": [round(low, 4), round(high, 4)]}
+        report[label] = row
+    return report
 
 
 def run(
@@ -271,7 +311,27 @@ def main() -> None:
         action="store_true",
         help="With --gate: raise the baseline's floors to this run's values where it did better.",
     )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Compare a grid of quality weights with BM25 alone (paired bootstrap).",
+    )
     args = parser.parse_args()
+    if args.sweep:
+        report = sweep(args.limit, args.seed, args.pool, args.max_ranked)
+        _echo(
+            f"Quality-weight sweep, pool={args.pool}, max_ranked={args.max_ranked} "
+            "(difference vs BM25 alone, 95% paired-bootstrap CI):"
+        )
+        for label, row in report.items():
+            s = row["summary"]
+            cells = "  ".join(
+                f"{m} {s[m if m != 'rr' else 'mrr']:.3f} ({row[m]['diff']:+.3f} "
+                f"[{row[m]['ci95'][0]:+.3f}, {row[m]['ci95'][1]:+.3f}])"
+                for m in _SWEEP_METRICS
+            )
+            _echo(f"  {label:<12} {cells}")
+        sys.exit(0)
     baseline = Path(args.gate) if args.gate else None
     sys.exit(
         run(

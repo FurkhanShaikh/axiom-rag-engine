@@ -12,6 +12,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 _EVALS = Path(__file__).resolve().parents[2] / "evals"
 sys.path.insert(0, str(_EVALS))
 
@@ -92,3 +94,18 @@ async def test_evidence_recall_counts_only_chunks_that_survive_the_trim() -> Non
 def test_variants_are_the_production_default_and_bm25_only() -> None:
     assert peval._VARIANTS["production"] == {}
     assert peval._VARIANTS["bm25_only"] == {"relevance_weight": 1.0, "quality_weight": 0.0}
+
+
+def test_sweep_compares_each_quality_weight_with_bm25_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(peval.reval, "load_corpus", lambda: _CORPUS)
+    monkeypatch.setattr(peval.reval, "load_queries", lambda split: [_QUERY])
+    report = peval.sweep(limit=0, seed=13, pool=3, max_ranked=10)
+
+    assert list(report) == [f"quality={w:g}" for w in peval._SWEEP_WEIGHTS]
+    assert "quality=0.4" in report  # the shipped blend is always measured
+    for metric in peval._SWEEP_METRICS:
+        # BM25 alone against itself: no difference, no interval.
+        assert report["quality=0"][metric] == {"diff": 0.0, "ci95": [0.0, 0.0]}
+    assert report["quality=0.4"]["summary"]["claims"] == 1
