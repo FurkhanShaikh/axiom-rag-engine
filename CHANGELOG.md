@@ -50,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`GET /v1/status` requires an API key.** Health probes remain open.
 
 ### Fixed
+- **PDF extraction had no limits.** Uploaded PDFs were parsed in a worker thread with no page cap or time limit; a thread cannot be cancelled, so a crafted file could pin a worker indefinitely, and parser errors outside a few caught types became 500s. Extraction now runs in a spawned child process that is killed after `AXIOM_CORPUS_PDF_TIMEOUT_SECONDS` (default 60), PDFs over `AXIOM_CORPUS_MAX_PDF_PAGES` (default 500) are refused before parsing, and every failure is a 422.
 - **HTTP request tracing never activated.** FastAPI instrumentation ran from the lifespan hook, after Starlette had built its middleware stack, so no request spans were emitted and pipeline spans were scattered across traces. It now runs in `create_app`; request spans carry `axiom.request_id` and pipeline spans nest under them.
 - **Audit events leaked provider error text.** Search, synthesizer, dense-ranking, and semantic/corroboration/contradiction error events stored raw exception messages, which callers can read via `include_debug` and `/v1/audits`. They now record `error_type` only; full messages go to the server log.
 - **Deleted documents were still cited from the response cache** until the entry expired. The corpus now keeps a version bumped by every ingest and delete, and the cache key includes it.

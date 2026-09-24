@@ -16,13 +16,14 @@ one standard.
 from __future__ import annotations
 
 import asyncio
-import io
 import re
 from collections.abc import Awaitable, Callable
 
+from axiom_rag_engine.config.settings import current_settings
 from axiom_rag_engine.corpus.store import CorpusStore, DocumentMeta
 from axiom_rag_engine.embeddings import embed_documents
 from axiom_rag_engine.nodes.retriever import chunk_into_paragraphs, strip_html
+from axiom_rag_engine.utils.pdf_extract import PdfExtractionError, extract_pdf_text
 
 # An async ``(model, texts) -> vectors`` embedder. Injectable so ingestion is
 # unit-testable without a live embedding backend.
@@ -57,19 +58,21 @@ def _looks_like_html(text: str, filename: str | None, content_type: str | None) 
 def _extract_pdf(data: bytes) -> str:
     """Extract text from a PDF's pages, joined by blank lines.
 
-    ``pypdf`` is imported lazily so it is a cost only for PDF ingestion. A
-    corrupt or encrypted PDF raises :class:`IngestionError` rather than a raw
-    parser error, so the API can turn it into a clean 422.
+    Parsing runs in a killable child process bounded by
+    ``AXIOM_CORPUS_MAX_PDF_PAGES`` and ``AXIOM_CORPUS_PDF_TIMEOUT_SECONDS``
+    (see ``utils.pdf_extract``). Any failure — corrupt, encrypted, too many
+    pages, too slow — raises :class:`IngestionError`, so the API returns a
+    clean 422 instead of a 500 or a pinned worker.
     """
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
-
+    settings = current_settings()
     try:
-        reader = PdfReader(io.BytesIO(data))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
-    except (PdfReadError, ValueError, OSError) as exc:
-        raise IngestionError(f"could not read PDF: {exc}") from exc
-    return "\n\n".join(p for p in pages if p)
+        return extract_pdf_text(
+            data,
+            max_pages=settings.corpus_max_pdf_pages,
+            timeout_seconds=settings.corpus_pdf_timeout_seconds,
+        )
+    except PdfExtractionError as exc:
+        raise IngestionError(str(exc)) from exc
 
 
 def extract_text(
