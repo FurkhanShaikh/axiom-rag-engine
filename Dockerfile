@@ -3,7 +3,7 @@
 # Update both FROM tags together when upgrading Python or uv.
 # Use the digest form (python:3.11.12-slim@sha256:<digest>) in production CI
 # for fully immutable image references.
-FROM python:3.11.12-slim AS builder
+FROM python:3.14.7-slim AS builder
 
 # Install uv — pinned version for reproducible builds.
 COPY --from=ghcr.io/astral-sh/uv:0.5.0 /uv /usr/local/bin/uv
@@ -25,7 +25,7 @@ RUN uv sync --frozen --no-dev --extra redis --extra vector
 
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
-FROM python:3.11.12-slim
+FROM python:3.14.7-slim
 
 # Create a non-root user for security, and apply Debian security updates: the
 # pinned base image ages, and CI's image scan fails on fixable critical CVEs in
