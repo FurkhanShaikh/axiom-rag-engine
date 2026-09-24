@@ -30,7 +30,11 @@ import pysbd
 import trafilatura
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from axiom_rag_engine.config.observability import get_tracer
+from axiom_rag_engine.config.observability import (
+    SEARCH_FAILURES,
+    SOURCES_BY_CONTENT_MODE,
+    get_tracer,
+)
 from axiom_rag_engine.state import GraphState
 from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 
@@ -107,6 +111,11 @@ _OVERLAP_SENTENCES = 1  # Sentences carried forward to bridge chunk boundaries
 _MAX_CHUNKS_PER_REQUEST = 200
 
 # Module-level segmenter; pySBD is stateless so this is safe for concurrent use.
+# English rules: it splits on CJK full stops (。) but not on some other
+# scripts' punctuation (e.g. the Arabic question mark ؟), and abbreviation and
+# number handling follow English, so non-English text may split at a few wrong
+# points. That only moves chunk boundaries (quotes are verified against the
+# chunk, and windows overlap by a sentence); see BENCHMARKS.md caveats.
 _SEGMENTER = pysbd.Segmenter(language="en", clean=False)
 
 
@@ -397,6 +406,7 @@ async def _safe_search(
         results = await asyncio.to_thread(_search_with_retry, query, backend)
         return query, results, None
     except Exception as exc:  # intentional: isolate per-query failure
+        SEARCH_FAILURES.labels(backend=type(backend).__name__).inc()
         logger.warning("Search query %r failed: %s", query, exc)
         return query, [], exc
 
@@ -505,6 +515,9 @@ async def retriever_node(state: GraphState, config: Any = None) -> dict[str, Any
             raw_content: str = result.get("content", "")
             content_mode: str = result.get("content_mode", "unknown")
             clean_text = strip_html(raw_content)
+            SOURCES_BY_CONTENT_MODE.labels(
+                mode=content_mode if content_mode in ("raw", "snippet") else "unknown"
+            ).inc()
 
             if not clean_text:
                 audit.append(_audit("retriever_empty_content", {"url": url}))

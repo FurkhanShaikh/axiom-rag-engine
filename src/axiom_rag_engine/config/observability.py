@@ -8,13 +8,16 @@ setup_tracing() once at startup in the FastAPI lifespan.
 from __future__ import annotations
 
 import functools
+import hmac
 import logging
 import os
+from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
-from prometheus_client import Counter, Histogram
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, Histogram, generate_latest
 
 logger = logging.getLogger("axiom_rag_engine.observability")
 
@@ -82,20 +85,108 @@ LLM_COST_USD_TOTAL = Counter(
     ["model"],
 )
 
+# ── Operational metrics (OBS-3) ─────────────────────────────────────────
+# Labels are bounded: fixed enums, backend class names, or safe_model_label.
+
+REWRITE_PASSES = Counter(
+    "axiom_rewrite_passes_total",
+    "Synthesis rewrite passes started after a verification pass left failures",
+)
+RE_RETRIEVALS = Counter(
+    "axiom_re_retrievals_total",
+    "Extra retrieval rounds started after a round's rewrites were exhausted",
+)
+PIPELINE_HALTS = Counter(
+    "axiom_pipeline_halts_total",
+    "Runs stopped early that returned their best verified pass, by reason",
+    ["reason"],
+)
+LLM_CALLS_PER_REQUEST = Histogram(
+    "axiom_llm_calls_per_request",
+    "LLM calls made by one completed request",
+    buckets=[1, 2, 4, 8, 16, 32, 64],
+)
+LLM_BUDGET_EXHAUSTED = Counter(
+    "axiom_llm_budget_exhausted_total",
+    "Per-request LLM budget exhaustions, by which cap was hit",
+    ["cap"],
+)
+SYNTHESIZER_PARSE_FAILURES = Counter(
+    "axiom_synthesizer_parse_failures_total",
+    "Synthesizer responses that could not be parsed (each triggers a corrective retry)",
+)
+SEARCH_FAILURES = Counter(
+    "axiom_search_failures_total",
+    "Search calls that failed, by backend",
+    ["backend"],
+)
+SOURCES_BY_CONTENT_MODE = Counter(
+    "axiom_sources_by_content_mode_total",
+    "Retrieved documents by verification text: full page (raw) or search snippet",
+    ["mode"],
+)
+RATE_LIMIT_REJECTIONS = Counter(
+    "axiom_rate_limit_rejections_total",
+    "Requests rejected with 429 by the rate limiter",
+)
+CACHE_ERRORS = Counter(
+    "axiom_cache_errors_total",
+    "Response-cache backend errors (each degrades to a miss or a skipped write)",
+    ["op"],
+)
+# key_id is a 12-hex-char hash of a configured API key: bounded by the number
+# of keys the operator configured.
+KEY_SPEND_USD = Counter(
+    "axiom_key_spend_usd_total",
+    "LLM spend in USD by API key (best-effort via litellm.completion_cost)",
+    ["key_id"],
+)
+KEY_BUDGET_REJECTIONS = Counter(
+    "axiom_key_budget_rejections_total",
+    "Requests refused because the API key reached AXIOM_KEY_DAILY_BUDGET_USD",
+    ["key_id"],
+)
+EMBEDDING_INPUTS = Counter(
+    "axiom_embedding_inputs_total",
+    "Texts sent for embedding, by model",
+    ["model"],
+)
+
 _prometheus_initialized = False
 
 
-def setup_prometheus(app: FastAPI) -> None:
-    """Instrument the FastAPI app with Prometheus metrics (idempotent)."""
+def setup_prometheus(
+    app: FastAPI, metrics_token: str | None = None
+) -> Callable[[Request], Awaitable[Response]]:
+    """Serve ``/metrics`` on ``app`` and return its endpoint.
+
+    HTTP request metrics are instrumented once per process (their collectors
+    are process-wide). The endpoint is added to every app; with
+    ``metrics_token`` it requires ``Authorization: Bearer <token>``, since the
+    metrics expose model usage and spend.
+    """
     global _prometheus_initialized
-    if _prometheus_initialized:
-        return
+    if not _prometheus_initialized:
+        from prometheus_fastapi_instrumentator import Instrumentator
 
-    from prometheus_fastapi_instrumentator import Instrumentator
+        Instrumentator().instrument(app)
+        _prometheus_initialized = True
 
-    Instrumentator().instrument(app).expose(app, include_in_schema=False)
-    _prometheus_initialized = True
-    logger.info("Prometheus metrics enabled at /metrics.")
+    expected = f"Bearer {metrics_token}".encode() if metrics_token else None
+
+    async def metrics(request: Request) -> Response:
+        if expected is not None:
+            given = request.headers.get("authorization", "").encode()
+            if not hmac.compare_digest(given, expected):
+                return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+
+    app.add_api_route("/metrics", metrics, methods=["GET"], include_in_schema=False)
+    logger.info(
+        "Prometheus metrics at /metrics (%s).",
+        "bearer token required" if expected else "unauthenticated",
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------

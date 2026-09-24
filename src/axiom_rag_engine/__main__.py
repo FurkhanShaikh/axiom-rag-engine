@@ -28,7 +28,13 @@ _CONFIG_SECTIONS: list[tuple[str, list[str]]] = [
     ("Auth", ["api_keys"]),
     (
         "LLM defaults",
-        ["default_synthesizer_model", "default_verifier_model", "ollama_api_base"],
+        [
+            "default_synthesizer_model",
+            "default_verifier_model",
+            "openrouter_synthesizer_model",
+            "openrouter_verifier_model",
+            "ollama_api_base",
+        ],
     ),
     (
         "LLM budget & concurrency",
@@ -36,6 +42,7 @@ _CONFIG_SECTIONS: list[tuple[str, list[str]]] = [
             "max_llm_calls_per_request",
             "max_tokens_per_request",
             "max_concurrent_llm",
+            "max_concurrent_verifier_llm",
             "allowed_metric_models",
         ],
     ),
@@ -128,7 +135,8 @@ def _render_config_text(settings: Any, redacted: dict[str, Any]) -> str:
         "Source legend: [env] = exported; [.env] = dotenv file; [default] = Settings default."
     )
     lines.append(
-        "TAVILY_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY are read by vendor SDKs and not shown."
+        "TAVILY_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY are read "
+        "by vendor SDKs and not shown."
     )
     return "\n".join(lines) + "\n"
 

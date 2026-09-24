@@ -5,11 +5,16 @@ One slowapi ``Limiter`` per app (``build_limiter``), keyed by a hashed valid API
 key or, failing that, the real client IP. Keys and trusted proxies are read from
 the request's app settings, so apps built with explicit settings rate-limit by
 their own configuration.
+
+Counters live in Redis when ``AXIOM_REDIS_URL`` is set, so replicas share one
+limit instead of each allowing the full rate; otherwise they are per process.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
+from typing import Any
 
 from fastapi import Request
 from slowapi import Limiter
@@ -17,6 +22,14 @@ from slowapi.util import get_remote_address
 
 from axiom_rag_engine.api.auth import is_valid_api_key, settings_from_request
 from axiom_rag_engine.config.settings import Settings
+
+logger = logging.getLogger("axiom_rag_engine.rate_limit")
+
+# The limiter checks Redis synchronously on the request path, so a slow Redis
+# must fail fast (and fall back to in-memory counters) rather than stall it.
+# (slowapi annotates the options as str, but they reach redis-py as-is, which
+# needs numbers.)
+_REDIS_OPTIONS: dict[str, Any] = {"socket_timeout": 0.5, "socket_connect_timeout": 0.5}
 
 
 def get_real_ip(request: Request) -> str:
@@ -53,5 +66,29 @@ def rate_limit_key(request: Request) -> str:
 
 
 def build_limiter(settings: Settings) -> Limiter:
-    """A fresh limiter (its own in-memory counters) with the default limit."""
+    """A fresh limiter with the default limit.
+
+    With ``AXIOM_REDIS_URL`` the counters are shared through Redis; if Redis is
+    unreachable at request time the limiter falls back to in-memory counters
+    (per process) until it recovers, rather than failing requests. Without it,
+    or if the redis package is missing, counters are in memory.
+    """
+    if settings.redis_url:
+        try:
+            limiter = Limiter(
+                key_func=rate_limit_key,
+                default_limits=[settings.rate_limit],
+                storage_uri=settings.redis_url,
+                storage_options=_REDIS_OPTIONS,
+                key_prefix="axiom:ratelimit",
+                in_memory_fallback_enabled=True,
+            )
+            logger.info("Rate limits: shared through Redis.")
+            return limiter
+        except Exception as exc:  # e.g. limits' ConfigurationError: redis not installed
+            logger.warning(
+                "AXIOM_REDIS_URL is set but rate limits cannot use it (%s); counting "
+                "per process. Install the 'redis' extra to share limits across replicas.",
+                exc,
+            )
     return Limiter(key_func=rate_limit_key, default_limits=[settings.rate_limit])

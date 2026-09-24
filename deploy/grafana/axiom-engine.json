@@ -157,6 +157,122 @@
           "legendFormat": "5xx/min"
         }
       ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "LLM tokens / min by model",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (model, kind) (rate(axiom_llm_tokens_total[5m])) * 60",
+          "legendFormat": "{{model}} / {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "LLM spend (USD / hour) by model",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 27, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(axiom_llm_cost_usd_total[5m])) * 3600",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "LLM spend, last 24h",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 20, "y": 27, "w": 4, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(increase(axiom_llm_cost_usd_total[24h]))",
+          "legendFormat": "USD"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Repair loop: rewrites, re-retrievals, halts (per min)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 35, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(axiom_rewrite_passes_total[5m])) * 60", "legendFormat": "rewrites"},
+        {"expr": "sum(rate(axiom_re_retrievals_total[5m])) * 60", "legendFormat": "re-retrievals"},
+        {
+          "expr": "sum by (reason) (rate(axiom_pipeline_halts_total[5m])) * 60",
+          "legendFormat": "halt: {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "LLM calls per request (p50 / p95)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 35, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(axiom_llm_calls_per_request_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(axiom_llm_calls_per_request_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Failures (per min): budget, parse, search, cache, rate limit",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 43, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (cap) (rate(axiom_llm_budget_exhausted_total[5m])) * 60",
+          "legendFormat": "budget: {{cap}}"
+        },
+        {
+          "expr": "sum(rate(axiom_synthesizer_parse_failures_total[5m])) * 60",
+          "legendFormat": "synthesizer parse"
+        },
+        {
+          "expr": "sum by (backend) (rate(axiom_search_failures_total[5m])) * 60",
+          "legendFormat": "search: {{backend}}"
+        },
+        {
+          "expr": "sum by (op) (rate(axiom_cache_errors_total[5m])) * 60",
+          "legendFormat": "cache: {{op}}"
+        },
+        {
+          "expr": "sum(rate(axiom_rate_limit_rejections_total[5m])) * 60",
+          "legendFormat": "rate limited"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Snippet-only sources (share, 1h)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 43, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(increase(axiom_sources_by_content_mode_total{mode=\"snippet\"}[1h])) / sum(increase(axiom_sources_by_content_mode_total[1h]))",
+          "legendFormat": "snippet share"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
     }
   ]
 }

@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — OpenRouter provider
+- **`OPENROUTER_API_KEY` is a first-class provider key.** With no Anthropic or OpenAI key, startup auto-selects `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (default `openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (default `openrouter/openai/gpt-4o-mini`, the same model as the OpenAI-key verifier). The key counts as an available provider for production's fail-closed check, is pushed to LiteLLM from `.env`, and is redacted by `check-config`.
+
+### Changed — semantic verifier baseline (EVAL-1)
+- **`--record` writes the enforced verifier baseline in one step.** `semantic_verifier_eval.py --model <verifier> --record` refuses samples under 200 (now the default `--limit`) and sets floors at the run's 95% Wilson lower bounds, so the first keyed run activates the gate. A baseline recorded on a different model is reported, not enforced (`openrouter/openai/gpt-4o-mini` counts as `gpt-4o-mini`).
+- **The nightly job uses whichever key is configured** (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, choosing the matching verifier), and fails when no key is set once the baseline is enforced.
+
+### Changed — LLM concurrency pools
+- **Verification calls no longer queue behind synthesis calls.** One process-wide semaphore (`AXIOM_MAX_CONCURRENT_LLM`) covered every LLM call, so slow synthesis calls could hold every slot while cheap verifier calls waited. Synthesis, verification (semantic, corroboration, contradiction) and auxiliary calls (reranker, embeddings) now have separate pools. `AXIOM_MAX_CONCURRENT_LLM` bounds synthesis and auxiliary calls as before; the new `AXIOM_MAX_CONCURRENT_VERIFIER_LLM` bounds verification (unset = the same value). Total in-flight calls can therefore reach the sum of the pools. The limits remain per process.
+
+### Changed — scaling out (DEP-1)
+- **Rate limits are shared across replicas through Redis.** With `AXIOM_REDIS_URL` set, slowapi's counters live in Redis (prefix `axiom:ratelimit`, 0.5 s socket timeouts), so N replicas enforce one limit instead of N. While Redis is unreachable each replica falls back to its own in-memory counters. Without Redis, or without the `redis` extra, limits stay per process (logged at startup).
+- **README → Scaling out** lists what replicas share and what they don't (LLM concurrency limits, audit trails and the SQLite corpus are per process; run a single corpus writer). The Dockerfile no longer implies the rest is shared.
+
+### Changed — retrieval latency (RET-3)
+- **Search backends are queried concurrently.** With `retrieval_source=both`, web search and the corpus ran one after the other, so their latencies added up; they now run in parallel (merge order unchanged: web first), each in a copy of the request's context so it sees the serving app's settings.
+- **Tavily calls carry an explicit timeout**, `AXIOM_SEARCH_TIMEOUT_SECONDS` (default 20 s). The client default was 60 s, retried three times.
+
+### Changed — scoring weights (RET-2; breaking for callers sending an inconsistent pair)
+- **`app_config.source_weight` and `chunk_weight` must sum to 1.0.** Nothing checked it, so `{"source_weight": 0.5}` scored with 0.5 + the default 0.6. A single weight now implies its pair (`0.5` → `0.5/0.5`); a pair that does not sum to 1.0 is rejected with 422.
+- Chunking's English-only sentence rules are documented (BENCHMARKS.md → Honest caveats).
+
+### Changed — observability hygiene (OBS-5)
+- **`AXIOM_METRICS_TOKEN` protects `/metrics`.** When set, scrapes need `Authorization: Bearer <token>` (the metrics include model usage and spend); `deploy/prometheus/prometheus.yml` shows the scrape setting. `/metrics` is now served by every app built with `create_app` (it was only on the first one in a process) and is exempt from rate limiting.
+- **The request-ID log prefix no longer stacks.** The text formatter prefixed the shared log record in place, so a second handler printed `[id] [id] …`; it now formats a copy.
+- **Grafana: token and spend panels** — tokens/min by model, USD/hour by model, and spend over the last 24 h.
+
+### Added — operational metrics (OBS-3)
+- New Prometheus series: `axiom_rewrite_passes_total`, `axiom_re_retrievals_total`, `axiom_pipeline_halts_total{reason}`, `axiom_llm_calls_per_request` (histogram), `axiom_llm_budget_exhausted_total{cap}`, `axiom_synthesizer_parse_failures_total`, `axiom_search_failures_total{backend}`, `axiom_sources_by_content_mode_total{mode}`, `axiom_rate_limit_rejections_total`, `axiom_cache_errors_total{op}` (Redis errors were only logged) and `axiom_embedding_inputs_total{model}`. Labels are bounded (fixed values, backend class names, `safe_model_label`). The Grafana dashboard gains repair-loop, calls-per-request, failures and snippet-share panels.
+
+### Added — per-key spending cap (API-7)
+- **`AXIOM_KEY_DAILY_BUDGET_USD` caps each API key's daily LLM spend.** Cost is summed per key per UTC day — failed, cancelled and timed-out runs included, stream or JSON — and a key at its cap is refused with 429 and `Retry-After` (until 00:00 UTC) before any model is called. Cache hits are free and still served. Totals are shared through Redis when the cache uses it (per process otherwise, or while Redis is unreachable). New metrics: `axiom_key_spend_usd_total{key_id}` and `axiom_key_budget_rejections_total{key_id}` (`key_id` is a short hash of the key). Costs come from LiteLLM, so models it cannot price count as $0. Document ingestion (admin keys only) is not capped.
+
+### Changed — one run path for both endpoints (API-5)
+- **`/v1/synthesize` and `/v1/synthesize/stream` run requests the same way.** Both go through `graph.run_events` (LangGraph's event stream, with the deadline, keepalives and disconnect cancellation in one place) and end through one bookkeeping object, so duration and outcome metrics, audit trails, cache writes and per-key spend are identical. The stream now takes its final state from LangGraph instead of re-deriving it with a hand-written reducer (which replaced `past_seen_urls` instead of appending), and a stream closed by the client now counts as `cancelled`, like the JSON endpoint's 499.
+
+### Fixed — explicit model configuration
+- **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
+
 ### Changed — synthesis
 - **Tier 2 is reachable.** Chunk headers now show each chunk's source domain (sanitized to hostname characters), and the synthesizer is asked to cite every chunk from a different source that states a fact (up to 3, each with its own verbatim quote). On 100 ASQA questions (local qwen3.5:9b) sentences citing ≥ 2 domains went from 0.6% to 23.5% and Tier 2 from 0% to 20%, with Tier 2 sentences judged as well supported as Tier 3 (0.98 vs 0.95). See BENCHMARKS.md → Tier calibration.
 

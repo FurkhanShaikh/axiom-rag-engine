@@ -23,6 +23,7 @@ from typing import Any
 import litellm  # noqa: F401 — kept as a module attribute so tests can patch litellm.acompletion here
 from pydantic import ValidationError
 
+from axiom_rag_engine.config.observability import SYNTHESIZER_PARSE_FAILURES
 from axiom_rag_engine.config.settings import current_settings
 from axiom_rag_engine.models import SynthesizerOutput
 from axiom_rag_engine.schemas import SYNTHESIZER_SCHEMA
@@ -414,6 +415,7 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
         except ValueError as exc:
             # Category 3: malformed LLM response — inject correction and retry.
             last_error = exc
+            SYNTHESIZER_PARSE_FAILURES.inc()
             audit.append(
                 _audit(
                     "synthesizer_malformed_response",

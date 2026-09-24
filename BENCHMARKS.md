@@ -395,8 +395,10 @@ python tasks.py evals download
 # Deterministic gate — no keys, this is the per-PR gate
 python tasks.py evals gate
 
-# Keyed semantic verifier accuracy (production model)
-python tasks.py evals semantic -- --model gpt-4o-mini --limit 200
+# Keyed semantic verifier accuracy (production model, 200 examples by default)
+python tasks.py evals semantic -- --model gpt-4o-mini
+# The same model through an OpenRouter key
+python tasks.py evals semantic -- --model openrouter/openai/gpt-4o-mini
 
 # Free model via OpenRouter (shared endpoints throttle — run serially).
 # Rate limits are retried by the production call path (AXIOM_LLM_MAX_RETRIES,
@@ -424,24 +426,33 @@ See [`evals/README.md`](evals/README.md) for the harness internals and
 ## Recording the baseline
 
 The regression gate needs defensible floors before it can block. To activate
-the semantic gate:
+the semantic gate, run the verifier you deploy with `--record`:
 
-1. **Run it** on the production verifier model with a meaningful sample:
-   ```bash
-   python tasks.py evals semantic -- --model gpt-4o-mini --limit 200
-   ```
-2. **Read the summary** the run prints (recall, precision, f1, accuracy,
-   error_rate). Recall, precision and accuracy come with 95% Wilson intervals
-   (`ci95` in the results file) — publish them with the point values, and
-   prefer a sample large enough that the intervals are narrow.
-3. **Set the floors** in `evals/baselines/semantic-verifier.json` a few points
-   below each observed value — the `tolerance` band absorbs run-to-run noise, so
-   the floor is the "never regress past here" line, not the observed number
-   itself. Set `error_rate`'s ceiling a few points above observed.
-4. **Fill in this page** — the results table above and the `recorded_at` /
-   `model` fields in the baseline.
-5. **Flip `enforcement` to `"enforce"`** in the baseline. From then on, a
-   regression past the tolerance band fails the nightly job.
+```bash
+python tasks.py evals semantic -- --model gpt-4o-mini --record
+# or with only an OpenRouter key (the same model, routed):
+python tasks.py evals semantic -- --model openrouter/openai/gpt-4o-mini --record
+# or with only an Anthropic key:
+python tasks.py evals semantic -- --model claude-haiku-4-5 --record
+```
+
+`--record` refuses samples under 200 examples. It writes
+`evals/baselines/semantic-verifier.json` with `enforcement: "enforce"`, the
+model, the date, and floors at the run's **95% Wilson lower bounds** (F1 at the
+F1 of the precision and recall bounds; the error-rate ceiling at its upper
+bound, at least 5%). A rerun of the same model then fails only on a regression
+beyond sampling noise. Commit the baseline and add the results (with their
+`ci95` intervals) to the table above.
+
+The gate compares like with like: run against a baseline recorded on a
+different model (`openrouter/openai/gpt-4o-mini` and `gpt-4o-mini` count as the
+same), it reports without enforcing.
+
+The nightly job (`nightly-evals.yml`) uses whichever key is configured as a
+repository secret — `OPENAI_API_KEY`, then `OPENROUTER_API_KEY`, then
+`ANTHROPIC_API_KEY` — and runs the gate. With no key it warns while the
+baseline is report-only, and **fails** once the baseline is enforced, so an
+expired or removed key cannot silently stop the measurement.
 
 Do the same for a keyed `e2e-golden` baseline (`pass_rate` floor, `cost_usd`
 ceiling) once you want the full keyed run gated nightly.
@@ -455,6 +466,12 @@ ceiling) once you want the full keyed run gated nightly.
   (Arabic, accented Latin, …) and splits CJK/Thai runs into character bigrams —
   the standard dictionary-free approach, but weaker than a real segmenter. It
   did not change the SciFact numbers above (English).
+- **Sentence segmentation uses English rules.** Chunking splits long
+  paragraphs with pySBD's English segmenter. It breaks on CJK full stops (。)
+  but not on some other scripts' punctuation (e.g. the Arabic question mark
+  ؟), and abbreviations and numbers follow English conventions, so other
+  languages can get a few misplaced chunk boundaries. Retrieval quality
+  has only been measured on English datasets.
 - **Tier calibration is only as good as its judge.** The ASQA calibration
   above used a local 4B judge that rated nearly everything supported; it cannot
   separate the tiers. A stronger judge is the next measurement, and the tier

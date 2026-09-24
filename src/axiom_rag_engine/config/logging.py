@@ -44,6 +44,9 @@ class _TextFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         rid = request_id_ctx.get()
         if rid:
+            # Prefix a copy: the record is shared by every handler, so mutating
+            # it would stack the prefix once per handler (or per format call).
+            record = logging.makeLogRecord(record.__dict__)
             record.msg = f"[{rid}] {record.msg}"
         return super().format(record)
 

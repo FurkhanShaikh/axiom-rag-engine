@@ -142,6 +142,9 @@ async def get_status(
             "max_llm_calls_per_request": settings.max_llm_calls_per_request,
             "max_tokens_per_request": settings.max_tokens_per_request,
             "max_concurrent_llm": settings.max_concurrent_llm,
+            "max_concurrent_verifier_llm": (
+                settings.max_concurrent_verifier_llm or settings.max_concurrent_llm
+            ),
         },
         "models": {
             "synthesizer_default": services.default_synthesizer_model,

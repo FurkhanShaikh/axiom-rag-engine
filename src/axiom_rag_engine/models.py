@@ -35,7 +35,8 @@ class AppConfig(BaseModel):
         le=1.0,
         description=(
             "Weight applied to the domain-authority score when computing the combined "
-            "chunk score. Paired with ``chunk_weight``; the two should sum to 1.0."
+            "chunk score. Paired with ``chunk_weight``; the two must sum to 1.0 (set "
+            "only one and the other is derived)."
         ),
     )
     chunk_weight: float = Field(
@@ -47,6 +48,22 @@ class AppConfig(BaseModel):
             "combined chunk score. Paired with ``source_weight``."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_weights_sum_to_one(self) -> AppConfig:
+        # One weight given: derive its pair, so {"source_weight": 0.5} means 0.5/0.5
+        # rather than silently scoring against 0.5 + the default 0.6.
+        given = {"source_weight", "chunk_weight"} & self.model_fields_set
+        if given == {"source_weight"}:
+            self.chunk_weight = round(1.0 - self.source_weight, 6)
+        elif given == {"chunk_weight"}:
+            self.source_weight = round(1.0 - self.chunk_weight, 6)
+        elif abs(self.source_weight + self.chunk_weight - 1.0) > 1e-6:
+            raise ValueError(
+                "source_weight and chunk_weight must sum to 1.0 "
+                f"(got {self.source_weight} + {self.chunk_weight})."
+            )
+        return self
 
 
 class ModelConfig(BaseModel):

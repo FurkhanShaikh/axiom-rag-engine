@@ -24,6 +24,7 @@ from axiom_rag_engine.config.settings import Settings
 from axiom_rag_engine.corpus.store import CorpusStore
 from axiom_rag_engine.graph import build_axiom_graph
 from axiom_rag_engine.services import AppServices
+from axiom_rag_engine.spend import MemorySpendLedger, RedisSpendLedger, SpendLedger
 
 logger = logging.getLogger("axiom_rag_engine")
 
@@ -36,13 +37,6 @@ with contextlib.suppress(importlib.metadata.PackageNotFoundError):
 # ---------------------------------------------------------------------------
 # LLM provider detection
 # ---------------------------------------------------------------------------
-
-# Read the built-in defaults straight off the Settings fields rather than
-# restating them: these are compared against the resolved config to detect
-# "operator did not choose a model", so a copy that drifts from settings.py
-# would silently make every request look operator-configured.
-_SETTINGS_DEFAULT_SYNTH: str = Settings.model_fields["default_synthesizer_model"].default
-_SETTINGS_DEFAULT_VERIF: str = Settings.model_fields["default_verifier_model"].default
 
 # Ollama model preference order (first match wins)
 _OLLAMA_PREFERENCE = [
@@ -85,16 +79,18 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
     Detect available LLM providers and return (synthesizer_model, verifier_model).
 
     Resolution order:
-      1. If the operator explicitly set AXIOM_DEFAULT_*_MODEL (differs from the
-         built-in default), trust their choice unconditionally.
+      1. If the operator explicitly set AXIOM_DEFAULT_*_MODEL (in the
+         environment, .env or the Settings constructor — even to the built-in
+         default value), trust their choice unconditionally.
       2. Otherwise, auto-select by probing for API keys and Ollama availability:
-         synthesizer: Anthropic > OpenAI > Ollama
-         verifier:    OpenAI   > Anthropic > Ollama
+         synthesizer: Anthropic > OpenAI    > OpenRouter > Ollama
+         verifier:    OpenAI   > Anthropic > OpenRouter > Ollama
       3. If no provider is reachable, raise RuntimeError at startup rather than
          letting requests fail mid-pipeline with an opaque error.
     """
     has_anthropic = bool(settings.anthropic_api_key)
     has_openai = bool(settings.openai_api_key)
+    has_openrouter = bool(settings.openrouter_api_key)
 
     ollama_models = _list_ollama_models(settings.ollama_api_base)
     best_ollama = _best_ollama_model(ollama_models)
@@ -102,8 +98,10 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
 
     configured_synth = settings.default_synthesizer_model
     configured_verif = settings.default_verifier_model
-    operator_set_synth = configured_synth != _SETTINGS_DEFAULT_SYNTH
-    operator_set_verif = configured_verif != _SETTINGS_DEFAULT_VERIF
+    # Explicitly set, not "differs from the default": an operator who pins the
+    # default model must not be auto-switched to another provider.
+    operator_set_synth = "default_synthesizer_model" in settings.model_fields_set
+    operator_set_verif = "default_verifier_model" in settings.model_fields_set
 
     def _select(role: str, operator_set: bool, configured: str) -> str:
         if operator_set:
@@ -116,6 +114,8 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
                 return "claude-opus-4-8"
             if has_openai:
                 return "gpt-4o"
+            if has_openrouter:
+                return settings.openrouter_synthesizer_model
             if has_ollama:
                 return f"ollama/{best_ollama}"
         else:  # verifier
@@ -125,6 +125,8 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
                 return "gpt-4o-mini"
             if has_anthropic:
                 return "claude-haiku-4-5"
+            if has_openrouter:
+                return settings.openrouter_verifier_model
             if has_ollama:
                 return f"ollama/{best_ollama}"
 
@@ -141,7 +143,7 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
         )
         return configured_synth, configured_verif
 
-    if not has_anthropic and not has_openai and not has_ollama:
+    if not (has_anthropic or has_openai or has_openrouter or has_ollama):
         # Only fail-closed in production. In dev/test envs we fall back to the
         # configured defaults so the app can boot without provider credentials —
         # individual requests will surface the missing-key error at call time.
@@ -150,13 +152,15 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
                 "No LLM provider is available. Configure one of:\n"
                 "  • ANTHROPIC_API_KEY  (recommended for production)\n"
                 "  • OPENAI_API_KEY\n"
+                "  • OPENROUTER_API_KEY\n"
                 f"  • Ollama running at {settings.ollama_api_base} with at least one model pulled\n"
                 "Or set BOTH AXIOM_DEFAULT_SYNTHESIZER_MODEL and AXIOM_DEFAULT_VERIFIER_MODEL "
                 "to models your environment can reach."
             )
         logger.warning(
             "No LLM provider detected; using configured defaults (synth=%s, verif=%s). "
-            "Requests will fail until ANTHROPIC_API_KEY, OPENAI_API_KEY, or Ollama is available.",
+            "Requests will fail until ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, "
+            "or Ollama is available.",
             configured_synth,
             configured_verif,
         )
@@ -229,6 +233,13 @@ def build_cache(settings: Settings) -> CacheBackend:
     )
 
 
+def build_spend_ledger(cache: CacheBackend) -> SpendLedger:
+    """Share per-key spend through the cache's Redis when there is one."""
+    if isinstance(cache, RedisCacheBackend):
+        return RedisSpendLedger(cache.client)
+    return MemorySpendLedger()
+
+
 def build_corpus_store(settings: Settings) -> CorpusStore | None:
     """Open the corpus store when AXIOM_CORPUS_DB_PATH is set, else return None.
 
@@ -277,6 +288,7 @@ def build_search_backend(settings: Settings, corpus_store: CorpusStore | None) -
                     api_key=tavily_key,
                     fetch_full_pages=settings.fetch_full_pages,
                     max_raw_content_chars=settings.max_raw_content_chars,
+                    timeout_seconds=settings.search_timeout_seconds,
                 )
             )
             modes.append("tavily")
@@ -356,6 +368,8 @@ def build_services(settings: Settings, *, search_backend: Any = None) -> AppServ
         os.environ.setdefault("ANTHROPIC_API_KEY", settings.anthropic_api_key)
     if settings.openai_api_key:
         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+    if settings.openrouter_api_key:
+        os.environ.setdefault("OPENROUTER_API_KEY", settings.openrouter_api_key)
 
     audit_store = AuditStore(maxsize=settings.audit_retention)
     if settings.audit_retention:
@@ -378,10 +392,11 @@ def build_services(settings: Settings, *, search_backend: Any = None) -> AppServ
     engine = build_axiom_graph()
     logger.info("Axiom Engine graph compiled and ready.")
 
+    cache = build_cache(settings)
     return AppServices(
         settings=settings,
         engine=engine,
-        cache=build_cache(settings),
+        cache=cache,
         audit_store=audit_store,
         corpus_store=corpus_store,
         search_backend=backend,
@@ -390,4 +405,5 @@ def build_services(settings: Settings, *, search_backend: Any = None) -> AppServ
         default_verifier_model=verif_model,
         started_at=time.time(),
         version=VERSION,
+        spend_ledger=build_spend_ledger(cache),
     )

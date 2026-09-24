@@ -53,6 +53,8 @@ class TavilySearchBackend:
         fetch_full_pages: Request full page text. When False, or when Tavily
             returns no raw content for a result, the snippet is used instead.
         max_raw_content_chars: Per-document truncation cap on raw page text.
+        timeout_seconds: Per-request timeout. The retriever retries a failed
+            search twice, so a stalled Tavily costs at most ~3x this.
     """
 
     def __init__(
@@ -61,8 +63,10 @@ class TavilySearchBackend:
         max_results: int = 5,
         fetch_full_pages: bool = True,
         max_raw_content_chars: int = 200_000,
+        timeout_seconds: float = 20.0,
     ) -> None:
         self._client = TavilyClient(api_key=api_key)
+        self._timeout_seconds = timeout_seconds
         self._max_results = max_results
         self._fetch_full_pages = fetch_full_pages
         self._max_raw_content_chars = max_raw_content_chars
@@ -91,6 +95,7 @@ class TavilySearchBackend:
             query,
             max_results=self._max_results,
             include_raw_content=_RAW_CONTENT_FORMAT if self._fetch_full_pages else None,
+            timeout=self._timeout_seconds,
         )
         results: list[dict[str, Any]] = []
         snippet_fallbacks = 0

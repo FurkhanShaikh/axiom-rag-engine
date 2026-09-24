@@ -127,8 +127,9 @@ class Settings(BaseSettings):
     )
 
     # ── LLM defaults ─────────────────────────────────────────────────────
-    # These doubles as the "operator did not choose a model" sentinel — see
-    # resolve_llm_defaults in bootstrap.py, which reads them via model_fields.
+    # When these are not set explicitly (env, .env or constructor), startup
+    # auto-selects models from the providers it finds — see
+    # resolve_llm_defaults in bootstrap.py, which checks model_fields_set.
     default_synthesizer_model: str = Field(
         default="claude-opus-4-8",
         description="Default synthesizer LiteLLM model ID.",
@@ -169,7 +170,10 @@ class Settings(BaseSettings):
     )
     redis_url: str | None = Field(
         default=None,
-        description="If set, use Redis for the response cache instead of in-memory TTLCache.",
+        description=(
+            "If set, use Redis for the response cache and rate-limit counters (shared "
+            "across replicas) instead of per-process memory."
+        ),
         alias="AXIOM_REDIS_URL",
     )
 
@@ -177,6 +181,15 @@ class Settings(BaseSettings):
     allow_mock_search: bool = Field(
         default=False,
         description="If true, allow MockSearchBackend in non-development envs.",
+    )
+    search_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=300,
+        description=(
+            "Timeout for one web search request (Tavily). A failed search is retried "
+            "twice, so a stalled provider costs at most about three times this."
+        ),
     )
     fetch_full_pages: bool = Field(
         default=True,
@@ -346,10 +359,31 @@ class Settings(BaseSettings):
         ge=0,
         description="Hard cap on total LLM tokens per request. 0 = unlimited.",
     )
+    key_daily_budget_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Daily LLM spend cap per API key in USD (UTC days). A key at its cap is "
+            "refused with 429 until midnight UTC. Shared across replicas via Redis "
+            "when configured. Models LiteLLM cannot price count as $0. 0 = no cap."
+        ),
+    )
     max_concurrent_llm: int = Field(
         default=5,
         ge=1,
-        description="Maximum concurrent in-flight LLM calls across all requests.",
+        description=(
+            "Maximum concurrent in-flight synthesis LLM calls across all requests; also "
+            "bounds auxiliary calls (reranker, embeddings) in their own pool."
+        ),
+    )
+    max_concurrent_verifier_llm: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum concurrent in-flight verification calls (semantic, corroboration, "
+            "contradiction), in a pool separate from synthesis so cheap checks never "
+            "queue behind slow synthesis calls. Unset = max_concurrent_llm."
+        ),
     )
     llm_timeout_seconds: float = Field(
         default=120.0,
@@ -404,6 +438,9 @@ class Settings(BaseSettings):
             "gpt-4o",
             "gpt-4o-mini",
             "gpt-4-turbo",
+            # OpenRouter auto-selected defaults
+            "openrouter/openai/gpt-4o",
+            "openrouter/openai/gpt-4o-mini",
             # Local (prefix-matched)
             "ollama",
         ],
@@ -429,12 +466,38 @@ class Settings(BaseSettings):
         description="OpenAI API key. Presence enables gpt-* model selection.",
         alias="OPENAI_API_KEY",
     )
+    openrouter_api_key: str | None = Field(
+        default=None,
+        description=(
+            "OpenRouter API key. Presence enables openrouter/* models, and the "
+            "openrouter_* defaults below when no Anthropic or OpenAI key is set."
+        ),
+        alias="OPENROUTER_API_KEY",
+    )
+    openrouter_synthesizer_model: str = Field(
+        default="openrouter/openai/gpt-4o",
+        description="Synthesizer auto-selected when OpenRouter is the only cloud provider.",
+    )
+    openrouter_verifier_model: str = Field(
+        default="openrouter/openai/gpt-4o-mini",
+        description=(
+            "Verifier auto-selected when OpenRouter is the only cloud provider. The "
+            "default is the same model as the OpenAI-key verifier, routed via OpenRouter."
+        ),
+    )
 
     # ── Audit ────────────────────────────────────────────────────────────
     audit_retention: int = Field(
         default=0,
         ge=0,
         description="Number of recent audit trails to keep in memory for GET /v1/audits/{request_id}. 0 = disabled.",
+    )
+    metrics_token: str | None = Field(
+        default=None,
+        description=(
+            "If set, GET /metrics requires 'Authorization: Bearer <token>'. The "
+            "metrics include model usage and spend. Unset = unauthenticated."
+        ),
     )
     log_audit_events: bool = Field(
         default=False,

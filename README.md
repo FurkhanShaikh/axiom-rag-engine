@@ -71,9 +71,12 @@ resolved configuration.
 | `AXIOM_API_KEYS` | _(empty)_ | Comma-separated API keys. Required when env != development. |
 | `AXIOM_ADMIN_API_KEYS` | _(empty)_ | Keys allowed to ingest and delete corpus documents when auth is required (they are also valid API keys). Empty = corpus writes are refused. |
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
-| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
-| `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
+| `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. If not set explicitly, startup picks one from the available providers: Anthropic → OpenAI → OpenRouter → Ollama. |
+| `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. If not set explicitly, startup picks one: OpenAI → Anthropic → OpenRouter → Ollama. |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | _(empty)_ | Provider keys, read by LiteLLM. |
+| `OPENROUTER_API_KEY` | _(empty)_ | OpenRouter key: one key for many vendors' models (`openrouter/<vendor>/<model>`). With no Anthropic or OpenAI key, startup uses `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (`openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (`openrouter/openai/gpt-4o-mini`). |
 | `AXIOM_ALLOWED_SYNTHESIZER_MODELS` | _(empty)_ | Synthesizer models callers may request besides the default when auth is required (others get 422). The verifier is always server-controlled when auth is required. |
+| `AXIOM_KEY_DAILY_BUDGET_USD` | `0` | Daily LLM spend cap per API key (UTC days). A key at its cap gets 429 with `Retry-After` until 00:00 UTC, before any model is called; failed and cancelled runs count. Cost is LiteLLM's estimate, so models it cannot price (Ollama) count as $0. Per-key spend is exported as `axiom_key_spend_usd_total{key_id}`. `0` = no cap. |
 | `AXIOM_LLM_MAX_RETRIES` | `2` | Retries for transient provider failures (rate limit, timeout, 5xx) per LLM call. |
 | `AXIOM_LLM_TIMEOUT_SECONDS` | `120` | Timeout for one LLM call. Raise it for slow local models. |
 | `AXIOM_REQUEST_DEADLINE_SECONDS` | `300` | Wall-clock limit per pipeline run. On expiry after a verified pass that pass is returned (`partial`); before one, HTTP 504. `0` disables. |
@@ -81,15 +84,17 @@ resolved configuration.
 | `AXIOM_RRF_K` | `60` | Reciprocal-rank-fusion constant for hybrid ranking. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |
 | `AXIOM_CACHE_TTL_SECONDS` | `300` | Response cache TTL. |
-| `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for distributed cache. |
+| `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for the response cache and rate-limit counters, shared across replicas (see [Scaling out](#scaling-out)). |
 | `AXIOM_CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins. |
 | `AXIOM_DOCS_ENABLED` | _(auto)_ | Serve /docs and /redoc. Unset: on when auth is disabled, off when auth is required. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
 | `AXIOM_CORROBORATION_ENABLED` | `false` | When true, Tier 2 requires ≥2 sources to *corroborate* the claim (an extra verifier call), not just cite ≥2 domains. See [Verification tiers](#verification-tiers). |
+| `AXIOM_SEARCH_TIMEOUT_SECONDS` | `20` | Timeout for one web search request (Tavily). A failed search is retried twice. |
 | `AXIOM_FETCH_FULL_PAGES` | `true` | Verify citations against full page text rather than search snippets. See [Verification sources](#verification-sources). |
 | `AXIOM_MAX_RAW_CONTENT_CHARS` | `200000` | Per-document cap on full page text. Oversized pages are truncated, not dropped. |
 | `AXIOM_AUDIT_RETENTION` | `0` | Retain the last N audit trails in memory for `/v1/audits/{id}`. |
 | `AXIOM_LOG_AUDIT_EVENTS` | `false` | Emit each audit event as a structured log line. |
+| `AXIOM_METRICS_TOKEN` | _(empty)_ | If set, `GET /metrics` requires `Authorization: Bearer <token>` (the metrics include model usage and spend). Scrapes are never rate-limited. |
 | `LOG_FORMAT` | `text` | `json` for structured log output. |
 
 See [.env.example](.env.example) for the full list with comments.
@@ -375,6 +380,13 @@ the log stream into your existing aggregator.
 per-node and per-model LLM latency histograms, **per-model token + USD cost
 counters** (`axiom_llm_tokens_total`, `axiom_llm_cost_usd_total`), tier
 assignment rates, cache hit ratio, and verification-degradation counters.
+Operational counters cover the repair loop (`axiom_rewrite_passes_total`,
+`axiom_re_retrievals_total`, `axiom_pipeline_halts_total{reason}`,
+`axiom_llm_calls_per_request`), failures (`axiom_llm_budget_exhausted_total{cap}`,
+`axiom_synthesizer_parse_failures_total`, `axiom_search_failures_total{backend}`,
+`axiom_cache_errors_total{op}`, `axiom_rate_limit_rejections_total`), and inputs
+(`axiom_sources_by_content_mode_total{mode}` — snippet-only sources verify
+against a summary — and `axiom_embedding_inputs_total{model}`).
 
 A ready-to-import Grafana dashboard lives at
 [`deploy/grafana/axiom-engine.json`](deploy/grafana/axiom-engine.json). The
@@ -456,6 +468,21 @@ Endpoints once the stack is healthy:
 
 To run without the observability sidecars, comment out the `redis`,
 `prometheus`, and `grafana` services.
+
+### Scaling out
+
+Each container runs one Uvicorn worker. Running several replicas behind a load
+balancer works for the query path when they share Redis (`AXIOM_REDIS_URL`,
+with the `redis` extra installed):
+
+| State | Shared across replicas? |
+|---|---|
+| Response cache | Yes, through Redis |
+| Rate limits (`AXIOM_RATE_LIMIT`, `AXIOM_STREAM_RATE_LIMIT`) | Yes, through Redis. If Redis is unreachable, each replica counts on its own until it recovers. Without Redis, N replicas allow N times the rate. |
+| Per-key daily spend (`AXIOM_KEY_DAILY_BUDGET_USD`) | Yes, through Redis (falls back to per-process totals while Redis is unreachable). |
+| LLM concurrency limits (`AXIOM_MAX_CONCURRENT_LLM`, `AXIOM_MAX_CONCURRENT_VERIFIER_LLM`) | No: per process. Divide the provider's limit by the replica count. |
+| Audit trails (`GET /v1/audits/{id}`) | No: a trail is only on the replica that served the request. Use `AXIOM_LOG_AUDIT_EVENTS=true` to ship them to your log pipeline. |
+| Corpus (SQLite) | No: one file per replica. Run a single writer (one replica that receives ingestion) or serve corpus retrieval from one replica; replicas sharing a file over a network filesystem is not supported. |
 
 ## License
 
