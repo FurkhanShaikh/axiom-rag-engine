@@ -8,7 +8,8 @@ gives tests a clean slate per app.
 
 Deliberately still process-wide: the LLM concurrency semaphore (it bounds calls
 across *all* requests to protect provider rate limits), Prometheus metrics (one
-registry per process), and ``get_settings()`` reads inside pipeline nodes.
+registry per process), and the tracer provider. Pipeline code reads the serving
+app's settings through ``current_settings()``, bound per request by the API.
 """
 
 from __future__ import annotations

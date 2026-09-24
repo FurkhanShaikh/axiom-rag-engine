@@ -27,7 +27,7 @@ from axiom_rag_engine.config.observability import (
     TIER_ASSIGNMENTS,
     tag_current_span,
 )
-from axiom_rag_engine.config.settings import Settings
+from axiom_rag_engine.config.settings import Settings, use_settings
 from axiom_rag_engine.graph import PipelineDeadlineError, run_pipeline
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
 from axiom_rag_engine.models import AxiomRequest, AxiomResponse
@@ -295,6 +295,7 @@ async def synthesize(
     spent.
     """
     request_id_ctx.set(payload.request_id)
+    use_settings(services.settings)
     tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 
@@ -380,6 +381,7 @@ async def synthesize_stream(
     that stream to completion.
     """
     request_id_ctx.set(payload.request_id)
+    use_settings(services.settings)
     tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 

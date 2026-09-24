@@ -23,7 +23,7 @@ from typing import Any
 import litellm  # noqa: F401 — kept as a module attribute so tests can patch litellm.acompletion here
 from pydantic import ValidationError
 
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import current_settings
 from axiom_rag_engine.models import SynthesizerOutput
 from axiom_rag_engine.schemas import SYNTHESIZER_SCHEMA
 from axiom_rag_engine.state import GraphState
@@ -263,7 +263,7 @@ def _pre_llm_unanswerable_reason(chunks: list[dict[str, Any]]) -> str | None:
     scored = [c for c in chunks if "ranking_score" in c]
     if not scored:
         return None
-    threshold = get_settings().min_usable_ranking_score
+    threshold = current_settings().min_usable_ranking_score
     best = max((float(c.get("ranking_score", 0.0) or 0.0) for c in scored), default=0.0)
     if best < threshold:
         return (
@@ -302,7 +302,7 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
     models_cfg: dict = state.get("models_config") or {}
     app_cfg: dict = state.get("app_config") or {}
 
-    model: str = models_cfg.get("synthesizer") or get_settings().default_synthesizer_model
+    model: str = models_cfg.get("synthesizer") or current_settings().default_synthesizer_model
     expertise_level: str = app_cfg.get("expertise_level", "intermediate")
 
     # Prefer pre-ranked chunks; fall back to scored chunks (already sorted by

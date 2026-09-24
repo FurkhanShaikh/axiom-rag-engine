@@ -21,6 +21,7 @@ cases (see `tests/conftest.py`).
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
@@ -492,3 +493,22 @@ def _redact_url(url: str) -> str:
 def get_settings() -> Settings:
     """Return the process-wide Settings instance (cached)."""
     return Settings()
+
+
+# The settings of the app serving the current request. Set by the API layer
+# (``use_settings``) before the pipeline runs; asyncio tasks the request spawns
+# inherit it, so every node and LLM call sees its own app's configuration.
+_request_settings: ContextVar[Settings | None] = ContextVar("axiom_request_settings", default=None)
+
+
+def use_settings(settings: Settings) -> None:
+    """Make ``settings`` the configuration for the rest of the current request."""
+    _request_settings.set(settings)
+
+
+def current_settings() -> Settings:
+    """Settings for the code running now: the serving app's when inside a
+    request (see ``use_settings``), otherwise the process settings. Pipeline
+    code reads this, never ``get_settings()``, so apps built by ``create_app``
+    with explicit settings are honoured end to end."""
+    return _request_settings.get() or get_settings()

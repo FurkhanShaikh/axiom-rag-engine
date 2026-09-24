@@ -94,15 +94,17 @@ class TestParseJsonObject:
 
 
 class TestBudgetExhaustionIsHttp429:
-    def test_synthesizer_budget_overrun_returns_429(self, client, monkeypatch) -> None:
-        from axiom_rag_engine.nodes.retriever import MockSearchBackend, set_search_backend
+    def test_synthesizer_budget_overrun_returns_429(self) -> None:
+        from fastapi.testclient import TestClient
 
-        monkeypatch.setenv("AXIOM_MAX_LLM_CALLS_PER_REQUEST", "1")
-        from axiom_rag_engine.config.settings import get_settings
+        from axiom_rag_engine.config.settings import Settings
+        from axiom_rag_engine.main import create_app
+        from axiom_rag_engine.nodes.retriever import MockSearchBackend
 
-        get_settings.cache_clear()
-        set_search_backend(
-            MockSearchBackend(
+        # The budget cap comes from the serving app's settings.
+        app = create_app(
+            Settings(env="test", max_llm_calls_per_request=1),
+            search_backend=MockSearchBackend(
                 [
                     {
                         "url": "https://example.com/a",
@@ -113,13 +115,13 @@ class TestBudgetExhaustionIsHttp429:
                         ),
                     }
                 ]
-            )
+            ),
         )
 
         async def fake_llm(**kwargs: Any) -> MagicMock:
             return _response("not json")  # forces a parse retry -> second call -> over budget
 
-        with patch("litellm.acompletion", side_effect=fake_llm):
+        with TestClient(app) as client, patch("litellm.acompletion", side_effect=fake_llm):
             resp = client.post(
                 "/v1/synthesize",
                 json={"request_id": "budget-429", "user_query": "solid-state batteries"},

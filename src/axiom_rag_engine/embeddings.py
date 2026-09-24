@@ -18,7 +18,7 @@ from typing import Any
 
 import litellm
 
-from axiom_rag_engine.config.settings import get_settings
+from axiom_rag_engine.config.settings import current_settings
 
 
 def embed_prefixes(model: str) -> tuple[str, str]:
@@ -37,7 +37,7 @@ def _embedding_kwargs(model: str, inputs: list[str]) -> dict[str, Any]:
     # Ollama models need the api_base pointed at the local server, exactly as
     # the LLM path does. Non-ollama providers read their key from the env.
     if model.startswith("ollama/"):
-        kwargs["api_base"] = get_settings().ollama_api_base
+        kwargs["api_base"] = current_settings().ollama_api_base
     return kwargs
 
 
