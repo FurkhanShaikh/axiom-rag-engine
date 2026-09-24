@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — OpenRouter provider
 - **`OPENROUTER_API_KEY` is a first-class provider key.** With no Anthropic or OpenAI key, startup auto-selects `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (default `openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (default `openrouter/openai/gpt-4o-mini`, the same model as the OpenAI-key verifier). The key counts as an available provider for production's fail-closed check, is pushed to LiteLLM from `.env`, and is redacted by `check-config`.
 
+### Changed — semantic verifier baseline (EVAL-1)
+- **`--record` writes the enforced verifier baseline in one step.** `semantic_verifier_eval.py --model <verifier> --record` refuses samples under 200 (now the default `--limit`) and sets floors at the run's 95% Wilson lower bounds, so the first keyed run activates the gate. A baseline recorded on a different model is reported, not enforced (`openrouter/openai/gpt-4o-mini` counts as `gpt-4o-mini`).
+- **The nightly job uses whichever key is configured** (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, choosing the matching verifier), and fails when no key is set once the baseline is enforced.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

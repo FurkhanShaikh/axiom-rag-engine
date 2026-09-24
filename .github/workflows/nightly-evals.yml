@@ -3,8 +3,11 @@ name: Nightly Evals
 # Keyed quality evals — cost money, so they run on a schedule (and on demand),
 # not on every PR. The deterministic gate that runs per-PR lives in ci.yml.
 #
-# Activation: add an OPENAI_API_KEY repository secret (the default verifier
-# model is gpt-4o-mini). Without it, the job skips cleanly rather than failing.
+# Activation: add one provider key as a repository secret. The verifier model
+# follows the key: OPENAI_API_KEY -> gpt-4o-mini, OPENROUTER_API_KEY ->
+# openrouter/openai/gpt-4o-mini (same model), ANTHROPIC_API_KEY ->
+# claude-haiku-4-5. With no key the job warns while the baseline is
+# report-only and fails once it is enforced.
 on:
   schedule:
     - cron: "0 6 * * *" # 06:00 UTC daily
@@ -24,25 +27,38 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check for provider key
+      - name: Choose the verifier from the configured key
         id: guard
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -z "$OPENAI_API_KEY" ]; then
-            # Visible, not silent: the production verifier's quality is not
-            # being measured. Not a failure, so the nightly does not go red
-            # every day on repos without the secret.
-            echo "::warning title=Semantic verifier not measured::No OPENAI_API_KEY secret configured - the keyed semantic-verifier eval was skipped, so verifier quality is unmeasured (see BENCHMARKS.md, Recording the baseline)."
-            {
-              echo "### Semantic verifier eval skipped"
-              echo "No \`OPENAI_API_KEY\` secret is configured, so the production verifier was not measured tonight."
-              echo "Add the secret to run it; see BENCHMARKS.md, *Recording the baseline*."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "run=false" >> "$GITHUB_OUTPUT"
+          if [ -n "$OPENAI_API_KEY" ]; then
+            model=gpt-4o-mini
+          elif [ -n "$OPENROUTER_API_KEY" ]; then
+            model=openrouter/openai/gpt-4o-mini
+          elif [ -n "$ANTHROPIC_API_KEY" ]; then
+            model=claude-haiku-4-5
           else
-            echo "run=true" >> "$GITHUB_OUTPUT"
+            enforcement=$(python3 -c "import json; print(json.load(open('evals/baselines/semantic-verifier.json'))['enforcement'])")
+            {
+              echo "### Semantic verifier not measured"
+              echo "No \`OPENAI_API_KEY\`, \`OPENROUTER_API_KEY\` or \`ANTHROPIC_API_KEY\` secret is configured."
+              echo "See BENCHMARKS.md, *Recording the baseline*."
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$enforcement" = "enforce" ]; then
+              # An enforced gate that silently stops running is worse than a
+              # red nightly: fail until the key is restored.
+              echo "::error title=Semantic verifier not measured::The baseline is enforced but no provider key secret is configured."
+              exit 1
+            fi
+            echo "::warning title=Semantic verifier not measured::No provider key secret configured - verifier quality is unmeasured (baseline is still report-only)."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         if: steps.guard.outputs.run == 'true'
@@ -65,13 +81,14 @@ jobs:
         env:
           AXIOM_ENV: development
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        # The committed baseline ships report_only, so this reports the
-        # comparison without failing CI until real floors are recorded and
-        # enforcement is flipped (see BENCHMARKS.md). Once enforced, a
-        # regression fails this job.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        # Report-only until a baseline is recorded (--record, see
+        # BENCHMARKS.md); once enforced, a regression fails this job. A
+        # baseline recorded on a different model is reported, not enforced.
         run: |
           uv run python evals/semantic_verifier_eval.py \
-            --model gpt-4o-mini \
+            --model "${{ steps.guard.outputs.model }}" \
             --limit "${{ github.event.inputs.limit || '200' }}" \
             --gate
 

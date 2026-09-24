@@ -202,7 +202,8 @@ def evals() -> None:
 
     Usage:
         python tasks.py evals download                                # fetch datasets
-        python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
+        python tasks.py evals semantic -- --model gpt-4o-mini          # 200 examples
+        python tasks.py evals semantic -- --model gpt-4o-mini --record # write the enforced baseline
         python tasks.py evals e2e -- --model ollama/qwen3:8b
         python tasks.py evals e2e -- --validate-only                  # no LLM needed
         python tasks.py evals corpus -- --model ollama/nomic-embed-text --limit 100  # BYO-corpus retrieval

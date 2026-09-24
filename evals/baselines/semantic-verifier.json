@@ -3,7 +3,7 @@
   "enforcement": "report_only",
   "recorded_at": null,
   "model": "gpt-4o-mini",
-  "notes": "PLACEHOLDER FLOORS — not yet recorded. This baseline is report_only until the first keyed run on the production verifier model. To activate: run `python tasks.py evals semantic -- --model gpt-4o-mini --limit 200`, read the summary, set each floor a few points below the observed value (leaving the tolerance band for run-to-run noise), set recorded_at, and flip enforcement to \"enforce\". The floors below are the minimum bar a verification product should clear, not a measurement.",
+  "notes": "PLACEHOLDER FLOORS — not yet recorded. This baseline is report_only until the first keyed run on the production verifier model. To activate: run `python tasks.py evals semantic -- --model <deployed verifier> --record` (200 examples by default; an OpenRouter key works with --model openrouter/openai/gpt-4o-mini), which sets the floors at the run's 95% lower bounds, stamps recorded_at and flips enforcement to \"enforce\". Commit the result. The floors below are the minimum bar a verification product should clear, not a measurement.",
   "metrics": {
     "unfaithful_recall": { "floor": 0.7, "tolerance": 0.05 },
     "unfaithful_precision": { "floor": 0.7, "tolerance": 0.05 },

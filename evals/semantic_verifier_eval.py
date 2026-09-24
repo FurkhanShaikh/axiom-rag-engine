@@ -12,8 +12,10 @@ Low recall  = misrepresentations slip through (missed Tier 4).
 Low precision = faithful claims bounced into rewrite loops (wasted budget).
 
 Usage:
-    python tasks.py evals semantic -- --model gpt-4o-mini --limit 50
+    python tasks.py evals semantic -- --model gpt-4o-mini
     uv run python evals/semantic_verifier_eval.py --model ollama/qwen3:8b --limit 20
+    # record the enforced baseline for the deployed verifier (n >= 200):
+    python tasks.py evals semantic -- --model openrouter/openai/gpt-4o-mini --record
 """
 
 from __future__ import annotations
@@ -242,7 +244,78 @@ def _gate_metrics(summary: dict[str, Any]) -> dict[str, float]:
     }
 
 
-async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path | None) -> int:
+# A recorded baseline needs enough examples for its floors to mean something.
+MIN_RECORD_EXAMPLES = 200
+
+
+def model_family(model: str) -> str:
+    """The model behind a LiteLLM id, without routing prefixes:
+    ``openrouter/openai/gpt-4o-mini`` and ``gpt-4o-mini`` are the same model."""
+    return model.rsplit("/", 1)[-1]
+
+
+def record_baseline(path: Path, summary: dict[str, Any], model: str, today: str) -> dict:
+    """Write an enforced baseline whose floors are this run's 95% lower bounds.
+
+    Floors sit at the Wilson lower bound (F1 at the F1 of the precision and
+    recall bounds) and the error ceiling at the upper bound (at least 5%), so a
+    rerun of the same model passes unless it is worse beyond sampling noise.
+    """
+    if summary["total"] < MIN_RECORD_EXAMPLES:
+        raise ValueError(
+            f"recording needs at least {MIN_RECORD_EXAMPLES} examples, got {summary['total']}"
+        )
+    ci = summary["ci95"]
+    p_low, r_low = ci["unfaithful_precision"][0], ci["unfaithful_recall"][0]
+    f1_low = 2 * p_low * r_low / (p_low + r_low) if (p_low + r_low) else 0.0
+    _, err_high = gate.wilson_interval(summary["errors"], summary["total"])
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(
+        {
+            "enforcement": "enforce",
+            "recorded_at": today,
+            "model": model,
+            "sample": f"{summary['total']} SciFact examples",
+            "notes": (
+                f"Recorded on {model} over {summary['total']} examples. Floors are the 95% "
+                "Wilson lower bounds of this run and the error ceiling its upper bound, so "
+                "a rerun fails only on a regression beyond sampling noise. Re-record with "
+                "--record after changing the verifier prompt or model."
+            ),
+            "metrics": {
+                "unfaithful_recall": {"floor": r_low, "tolerance": 0.0},
+                "unfaithful_precision": {"floor": p_low, "tolerance": 0.0},
+                "unfaithful_f1": {"floor": round(f1_low, 4), "tolerance": 0.0},
+                "accuracy": {"floor": ci["accuracy"][0], "tolerance": 0.0},
+                "error_rate": {"ceiling": round(max(0.05, err_high), 4), "tolerance": 0.0},
+            },
+        }
+    )
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return data
+
+
+def baseline_for(model: str, baseline: dict) -> dict:
+    """The baseline to gate ``model`` against: report-only when it was recorded
+    on a different model, since another model's floors say nothing about this one."""
+    recorded_on = baseline.get("model")
+    if recorded_on and model_family(recorded_on) != model_family(model):
+        _echo(
+            f"Baseline was recorded on {recorded_on}, not {model}: reporting only. "
+            "Record one for this model with --record."
+        )
+        return {**baseline, "enforcement": "report_only"}
+    return baseline
+
+
+async def run(
+    model: str,
+    limit: int,
+    seed: int,
+    split: str,
+    gate_baseline: Path | None,
+    record: bool = False,
+) -> int:
     examples = load_examples(split)
     by_label = {
         "SUPPORT": sum(1 for e in examples if e.label == "SUPPORT"),
@@ -299,8 +372,17 @@ async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path
     _echo()
     _echo(f"Full records: {out_path}")
 
+    if record:
+        try:
+            record_baseline(BASELINE_PATH, summary, model, time.strftime("%Y-%m-%d"))
+        except ValueError as exc:
+            _echo(f"Not recorded: {exc}.")
+            return 1
+        _echo(f"Recorded {BASELINE_PATH.name} (enforced) on {model}.")
+        return 0
+
     if gate_baseline is not None:
-        baseline = gate.load_baseline(gate_baseline)
+        baseline = baseline_for(model, gate.load_baseline(gate_baseline))
         report = gate.evaluate_gate(_gate_metrics(summary), baseline)
         _echo()
         _echo(report.render())
@@ -314,7 +396,9 @@ def main() -> None:
     load_dotenv()  # so litellm sees OPENROUTER_API_KEY / OPENAI_API_KEY / etc.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="gpt-4o-mini", help="LiteLLM model id for the verifier")
-    parser.add_argument("--limit", type=int, default=50, help="Max examples (0 = all)")
+    parser.add_argument(
+        "--limit", type=int, default=MIN_RECORD_EXAMPLES, help="Max examples (0 = all)"
+    )
     parser.add_argument("--seed", type=int, default=13, help="Sampling seed")
     parser.add_argument("--split", default="dev", choices=("dev", "train"))
     parser.add_argument(
@@ -329,9 +413,21 @@ def main() -> None:
             f"Defaults to {BASELINE_PATH.name} when given no path."
         ),
     )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help=(
+            f"Write {BASELINE_PATH.name} from this run (enforced, floors at the 95% lower "
+            f"bounds). Needs --limit >= {MIN_RECORD_EXAMPLES} or 0."
+        ),
+    )
     args = parser.parse_args()
     baseline = Path(args.gate) if args.gate else None
-    sys.exit(asyncio.run(run(args.model, args.limit, args.seed, args.split, baseline)))
+    sys.exit(
+        asyncio.run(
+            run(args.model, args.limit, args.seed, args.split, baseline, record=args.record)
+        )
+    )
 
 
 if __name__ == "__main__":
