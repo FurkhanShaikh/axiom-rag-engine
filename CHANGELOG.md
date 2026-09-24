@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — docker-compose stack did not start
+- **Ollama crash-looped, so the stack never came up.** It runs as UID 1000, but the named volume is created root-owned and its home was `/`, so it could write neither its key nor its models (`mkdir /.ollama: permission denied`), and the engine waits for Ollama to be healthy. A one-shot `ollama-init` step now hands the volume to that UID, and Ollama keeps its key and models there (`HOME=/home/ollama`). Found by the new compose smoke test on its first run. Existing `ollama_models` volumes are re-owned on the next start; models pulled into the old `/models` layout need pulling again.
+
 ### Added — CI covers everything Dependabot can bump
 - **Compose smoke test.** A `compose-smoke` job starts the whole docker-compose stack and checks each service: the engine is ready with Redis as its cache, reaches Ollama over the compose network, Prometheus is scraping it, and Grafana is healthy with the dashboard and Prometheus datasource provisioned (`.github/scripts/compose-smoke.sh`). Image bumps to Redis, Ollama, Prometheus or Grafana were previously untested.
 - **Tests on the image's Python.** `test-image-python` reads the Python version from the Dockerfile and runs the suite on it, so a base-image bump is tested on the version it would ship even when it is outside the 3.11–3.13 matrix.

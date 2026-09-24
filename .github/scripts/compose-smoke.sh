@@ -19,15 +19,23 @@ trap cleanup EXIT
 # provider and mock search are all allowed, so the stack boots keyless.
 [ -f .env ] || printf 'AXIOM_ENV=development\n' > .env
 
-# --wait blocks until every service with a healthcheck is healthy (engine,
-# Ollama, Redis) and the rest are running.
-docker compose up -d --build --wait --wait-timeout 420
-
 retry() {  # retry <attempts> <command...>: until it succeeds, 2 s apart
   local n=$1; shift
   for _ in $(seq 1 "$n"); do "$@" && return 0; sleep 2; done
   "$@"
 }
+
+healthy() {  # healthy <container>: its compose healthcheck reports healthy
+  [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null)" = "healthy" ]
+}
+
+# Not `up --wait`: it can count the one-shot ollama-init step, which exits by
+# design, as a failure. The engine starts only after Ollama and Redis are
+# healthy (depends_on), so waiting for the engine's healthcheck covers them.
+docker compose up -d --build
+retry 210 healthy axiom-rag-engine
+for c in axiom-ollama axiom-redis; do healthy "$c" || { echo "$c is not healthy"; exit 1; }; done
+echo "engine, Ollama and Redis healthy"
 
 echo "== engine: ready, with Redis as its cache"
 curl -fsS http://localhost:8000/health/ready > ready.json
