@@ -28,9 +28,38 @@ async def health_live() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# Probes can arrive every few seconds from several sources; dependency checks
+# are reused for this long.
+_READINESS_TTL_SECONDS = 5.0
+
+
+async def _dependency_checks(services: AppServices) -> dict[str, str]:
+    """Reachability of the app's dependencies, cached for a few seconds."""
+    now = time.monotonic()
+    if services.readiness_checks and now - services.readiness_checked_at < _READINESS_TTL_SECONDS:
+        return services.readiness_checks
+    checks = {"cache": "ok" if await services.cache.ping() else "unavailable"}
+    if services.corpus_store is not None:
+        try:
+            await asyncio.to_thread(services.corpus_store.count_documents)
+            checks["corpus"] = "ok"
+        except Exception:
+            checks["corpus"] = "unavailable"
+    services.readiness_checks, services.readiness_checked_at = checks, now
+    return checks
+
+
 @router.get("/health/ready", summary="Readiness probe — is the engine ready to serve?")
 async def health_ready(request: Request) -> Response:
-    """Returns 200 if the graph engine is compiled and ready, 503 otherwise."""
+    """200 when the engine can serve, 503 when it cannot.
+
+    Beyond configuration, the probe checks the app's dependencies (cached for
+    a few seconds). A configured corpus database that cannot be read makes the
+    app not ready. The response cache is optional by design — its failures
+    degrade to cache misses — so an unreachable Redis reports
+    ``"status": "degraded"`` but stays ready, rather than pulling every
+    replica out of rotation.
+    """
     services: AppServices | None = getattr(request.app.state, "services", None)
     if services is None or services.engine is None:
         return JSONResponse(
@@ -52,7 +81,18 @@ async def health_ready(request: Request) -> Response:
             status_code=503,
             content={"status": "not_ready", "detail": "Live search backend is not configured."},
         )
-    return JSONResponse(content={"status": "ok"})
+    checks = await _dependency_checks(services)
+    if checks.get("corpus") == "unavailable":
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "detail": "Corpus database is unavailable.",
+                "checks": checks,
+            },
+        )
+    degraded = any(state != "ok" for state in checks.values())
+    return JSONResponse(content={"status": "degraded" if degraded else "ok", "checks": checks})
 
 
 @router.get("/v1/status", summary="Operator-oriented runtime status snapshot.")

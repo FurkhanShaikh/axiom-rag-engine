@@ -408,7 +408,9 @@ the current request consumed no tokens.
 # Liveness (process alive)
 curl -fsS http://localhost:8000/health/live
 
-# Readiness (engine compiled, keys + backend configured)
+# Readiness (engine compiled, keys + backend configured, dependencies reachable).
+# An unreadable corpus database -> 503; an unreachable Redis cache -> 200
+# "degraded" (the cache is optional: failures degrade to misses).
 curl -fsS http://localhost:8000/health/ready
 
 # Full operator snapshot (authenticated)
