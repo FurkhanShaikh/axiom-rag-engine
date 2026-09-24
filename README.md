@@ -69,6 +69,7 @@ resolved configuration.
 |---|---|---|
 | `AXIOM_ENV` | `production` | Runtime environment. Set to `development` to disable auth. |
 | `AXIOM_API_KEYS` | _(empty)_ | Comma-separated API keys. Required when env != development. |
+| `AXIOM_ADMIN_API_KEYS` | _(empty)_ | Keys allowed to ingest and delete corpus documents when auth is required (they are also valid API keys). Empty = corpus writes are refused. |
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
 | `AXIOM_DEFAULT_SYNTHESIZER_MODEL` | `claude-opus-4-8` | LiteLLM model ID for synthesis. |
 | `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
@@ -257,7 +258,9 @@ export AXIOM_EMBEDDING_MODEL=ollama/nomic-embed-text  # corpus retrieval is dens
 export AXIOM_RETRIEVAL_SOURCE=both                    # web | corpus | both
 ```
 
-Manage the corpus over HTTP:
+Manage the corpus over HTTP. The corpus is shared by every API key, so when
+auth is required, ingest and delete need a key listed in `AXIOM_ADMIN_API_KEYS`
+(403 otherwise); listing and reading need any valid key.
 
 | Method | Path | Purpose |
 |---|---|---|

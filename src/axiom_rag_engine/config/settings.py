@@ -115,6 +115,13 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Comma-separated list of valid API keys. Required when env != development.",
     )
+    admin_api_keys: CommaSepList = Field(
+        default_factory=list,
+        description=(
+            "Keys allowed to change the corpus (ingest and delete documents) when auth is "
+            "required. Admin keys are also valid API keys. Empty = corpus writes are refused."
+        ),
+    )
 
     # ── LLM defaults ─────────────────────────────────────────────────────
     # These doubles as the "operator did not choose a model" sentinel — see

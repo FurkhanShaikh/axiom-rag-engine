@@ -9,7 +9,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 
-from axiom_rag_engine.api.auth import verify_api_key
+from axiom_rag_engine.api.auth import verify_admin_key, verify_api_key
 from axiom_rag_engine.api.deps import Services
 from axiom_rag_engine.config.settings import use_settings
 from axiom_rag_engine.corpus.ingest import IngestionError, extract_text, ingest_text
@@ -121,7 +121,7 @@ async def _ingest_and_respond(
 async def ingest_document(
     services: Services,
     payload: DocumentIngestRequest,
-    _api_key: str | None = Depends(verify_api_key),
+    _api_key: str | None = Depends(verify_admin_key),
 ) -> Response:
     """Chunk, embed, and store a document. Re-ingesting an existing ``doc_id``
     replaces it. Returns the stored document's metadata (201)."""
@@ -143,7 +143,7 @@ async def upload_document(
     title: str = Form("", max_length=500),
     source: str = Form("", max_length=2000),
     doc_id: str | None = Form(None, max_length=200),
-    _api_key: str | None = Depends(verify_api_key),
+    _api_key: str | None = Depends(verify_admin_key),
 ) -> Response:
     """Ingest an uploaded file (text / markdown / HTML / PDF). The filename becomes
     the default ``source`` and content type guides extraction."""
@@ -199,7 +199,7 @@ async def get_document(
 async def delete_document(
     services: Services,
     doc_id: str,
-    _api_key: str | None = Depends(verify_api_key),
+    _api_key: str | None = Depends(verify_admin_key),
 ) -> Response:
     store = _corpus_store(services)
     if not await asyncio.to_thread(store.delete_document, doc_id):
