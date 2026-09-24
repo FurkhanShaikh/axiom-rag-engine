@@ -327,6 +327,24 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum concurrent in-flight LLM calls across all requests.",
     )
+    llm_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        le=3600,
+        description=(
+            "Timeout for one LLM call. Raise it for slow local models (Ollama on "
+            "CPU can need several minutes for a long prompt)."
+        ),
+    )
+    request_deadline_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        description=(
+            "Wall-clock limit for one pipeline run. When it expires after a verified "
+            "pass, that pass is returned (status partial); before any verified pass the "
+            "request fails with 504. 0 disables the deadline."
+        ),
+    )
     llm_max_retries: int = Field(
         default=2,
         ge=0,

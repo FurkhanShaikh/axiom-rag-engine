@@ -23,9 +23,6 @@ from axiom_rag_engine.config.settings import get_settings
 
 logger = logging.getLogger("axiom_rag_engine.llm")
 
-# Default timeout for all LLM calls.  Local models (Ollama) on CPU-only hardware
-# can be slow on large prompts — 600 s is the ceiling; cloud models finish in <10 s.
-_DEFAULT_TIMEOUT: int = 600
 
 # ---------------------------------------------------------------------------
 # Per-request LLM call budget
@@ -250,7 +247,7 @@ def build_completion_kwargs(
     model: str,
     messages: list[dict[str, Any]],
     temperature: float = 0.0,
-    timeout: int = _DEFAULT_TIMEOUT,
+    timeout: float | None = None,
     json_mode: bool = True,
     json_schema: JsonSchemaSpec | None = None,
 ) -> dict[str, Any]:
@@ -264,13 +261,14 @@ def build_completion_kwargs(
     - Other providers: with ``json_schema``, a ``json_schema`` response_format when
       LiteLLM reports the model supports it; otherwise (or with only
       ``json_mode``) ``{"type": "json_object"}``.
-    - Always sets timeout to prevent indefinite hangs.
+    - Always sets a timeout (``AXIOM_LLM_TIMEOUT_SECONDS`` unless given) to
+      prevent indefinite hangs.
     """
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "timeout": timeout,
+        "timeout": timeout if timeout is not None else get_settings().llm_timeout_seconds,
     }
 
     if model.startswith("ollama/"):
