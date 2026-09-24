@@ -27,9 +27,13 @@ RUN uv sync --frozen --no-dev --extra redis --extra vector
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM python:3.11.12-slim
 
-# Create a non-root user for security.
+# Create a non-root user for security, and apply Debian security updates: the
+# pinned base image ages, and CI's image scan fails on fixable critical CVEs in
+# its OS packages (e.g. openssl, gnutls).
 RUN useradd --create-home --shell /bin/bash axiom \
-    && apt-get update -qq && apt-get install -y --no-install-recommends curl \
+    && apt-get update -qq \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
