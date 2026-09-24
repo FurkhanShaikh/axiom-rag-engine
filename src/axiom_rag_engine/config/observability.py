@@ -1,7 +1,8 @@
 """
 Axiom Engine — Observability setup (Prometheus metrics + OpenTelemetry tracing).
 
-Call setup_prometheus() and setup_tracing() once at startup in the FastAPI lifespan.
+Call setup_prometheus() and instrument_app() while building the app, and
+setup_tracing() once at startup in the FastAPI lifespan.
 """
 
 from __future__ import annotations
@@ -101,23 +102,46 @@ def setup_prometheus(app: FastAPI) -> None:
 # ---------------------------------------------------------------------------
 
 _tracer: Tracer = trace.get_tracer("axiom-rag-engine")
+_tracer_provider_set = False
 
 
-def setup_tracing(app: FastAPI, service_name: str, version: str) -> None:
+def tracing_enabled() -> bool:
+    """True when OTEL_EXPORTER_OTLP_ENDPOINT is set (tracing is otherwise a no-op)."""
+    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+
+
+def instrument_app(app: FastAPI) -> None:
+    """Add OpenTelemetry HTTP server spans to ``app`` when tracing is enabled.
+
+    Must run while the app is being built: Starlette assembles its middleware
+    stack on the first ASGI call (the lifespan startup), so instrumenting from
+    the lifespan silently produced no request spans. The middleware resolves the
+    global tracer provider lazily, so :func:`setup_tracing` may still install the
+    provider later, at startup.
     """
-    Configure OpenTelemetry tracing if OTEL_EXPORTER_OTLP_ENDPOINT is set.
+    if not tracing_enabled():
+        return
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-    When the endpoint is not configured, the tracer remains a no-op (zero overhead).
+    FastAPIInstrumentor.instrument_app(app)
+
+
+def setup_tracing(service_name: str, version: str) -> None:
     """
-    global _tracer
+    Install the OTLP tracer provider if OTEL_EXPORTER_OTLP_ENDPOINT is set.
 
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if not endpoint:
+    Process-wide and idempotent (OpenTelemetry allows one global provider). When
+    the endpoint is not configured, the tracer remains a no-op (zero overhead).
+    """
+    global _tracer, _tracer_provider_set
+
+    if not tracing_enabled():
         logger.info("OTEL_EXPORTER_OTLP_ENDPOINT not set — tracing disabled (no-op).")
+        return
+    if _tracer_provider_set:
         return
 
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -126,11 +150,15 @@ def setup_tracing(app: FastAPI, service_name: str, version: str) -> None:
     provider = TracerProvider(resource=resource)
     provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(provider)
-
-    FastAPIInstrumentor.instrument_app(app)
+    _tracer_provider_set = True
 
     _tracer = trace.get_tracer(service_name, version)
-    logger.info("OpenTelemetry tracing enabled → %s", endpoint)
+    logger.info("OpenTelemetry tracing enabled → %s", os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+
+
+def tag_current_span(request_id: str) -> None:
+    """Attach the Axiom request id to the active span (the HTTP server span)."""
+    trace.get_current_span().set_attribute("axiom.request_id", request_id)
 
 
 def get_tracer() -> Tracer:
