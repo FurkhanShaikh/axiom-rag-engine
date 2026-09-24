@@ -408,7 +408,7 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
 
         except LLMBudgetExceededError:
             # Not a synthesizer failure: the request ran out of budget. Propagate
-            # unwrapped so the endpoint can answer HTTP 429 (not 500).
+            # unwrapped so the endpoint can answer HTTP 422 (not 500).
             raise
 
         except ValueError as exc:

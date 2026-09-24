@@ -93,8 +93,8 @@ class TestParseJsonObject:
             parse_json_object("x" * 300_000 + '{"a": 1}')
 
 
-class TestBudgetExhaustionIsHttp429:
-    def test_synthesizer_budget_overrun_returns_429(self) -> None:
+class TestBudgetExhaustionIsHttp422:
+    def test_synthesizer_budget_overrun_returns_422(self) -> None:
         from fastapi.testclient import TestClient
 
         from axiom_rag_engine.config.settings import Settings
@@ -126,7 +126,9 @@ class TestBudgetExhaustionIsHttp429:
                 "/v1/synthesize",
                 json={"request_id": "budget-429", "user_query": "solid-state batteries"},
             )
-        assert resp.status_code == 429
+        # Not 429: clients retry those, and this request would fail again.
+        assert resp.status_code == 422
         body = resp.json()
         assert body["status"] == "error"
+        assert "AXIOM_MAX_LLM_CALLS_PER_REQUEST" in body["error_message"]
         assert json.dumps(body)  # still a structured AxiomResponse

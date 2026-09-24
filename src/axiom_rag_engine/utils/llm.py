@@ -421,7 +421,7 @@ async def call_llm(
     Every LLM call in the pipeline goes through here so the policy is uniform:
       - the per-request call budget is consumed *before* the provider is hit
         (``LLMBudgetExceededError`` propagates unwrapped — callers decide whether
-        to degrade or abort, and the endpoint maps it to HTTP 429);
+        to degrade or abort, and the endpoint maps it to HTTP 422);
       - the global concurrency semaphore bounds in-flight calls;
       - transient provider failures (rate limit, timeout, 5xx) are retried up
         to ``AXIOM_LLM_MAX_RETRIES`` times with backoff, within one budget unit;
