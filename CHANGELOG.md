@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — release pipeline (CD)
+- **A version tag now publishes the Docker image and a GitHub Release**, alongside the existing PyPI upload. The image is built with OCI source/version/revision labels, scanned with Trivy (fixable critical CVEs block the push), and pushed to `ghcr.io/<owner>/axiom-rag-engine:<version>`; `:latest` moves only for final releases. The release carries this version's CHANGELOG section as notes (GitHub's generated notes if there is none), the wheel and sdist, and the SBOM, and is marked pre-release for `a`/`b`/`rc`/`.dev` versions. `publish.yml` now defaults to a read-only token; only the image job gets `packages: write` and only the release job `contents: write`. Plain `docker` and `gh` CLI, no new third-party actions.
+
 ### Added — Docker smoke test
 - CI now boots the built image next to a Redis (as docker-compose does) and requires `/health/ready` to report `ok`, `/v1/status` to show the Redis cache backend (the missing `redis` extra fixed in Wave 6 would fail this), and the numpy extra to import. The image was previously only built and scanned, never started.
 

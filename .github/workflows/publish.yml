@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+# Read-only by default; the jobs that publish ask for exactly what they need.
+permissions:
+  contents: read
+
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
@@ -54,3 +58,88 @@ jobs:
         uses: astral-sh/setup-uv@v7
       - name: Publish to PyPI (idempotent)
         run: uv publish --check-url https://pypi.org/simple/
+
+  publish-image:
+    # The same image CI builds, smoke-tests and scans, pushed to GHCR as
+    # ghcr.io/<owner>/axiom-rag-engine:<version> (and :latest for finals).
+    # Plain docker CLI, no third-party actions.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker build \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.version="$version" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            -t "$image:$version" .
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Scan image (fail on fixable critical vulnerabilities)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.1 image --exit-code 1 --severity CRITICAL \
+            --ignore-unfixed --no-progress "$IMAGE:$VERSION"
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/out" aquasec/trivy:0.58.1 image --format cyclonedx \
+            --output /out/sbom.cdx.json --no-progress "$IMAGE:$VERSION"
+      - name: Push to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$VERSION"
+          # PEP 440 pre-releases (aN/bN/rcN, .devN) never move :latest.
+          if ! [[ "$VERSION" =~ (a|b|rc|\.dev)[0-9]+$ ]]; then
+            docker tag "$IMAGE:$VERSION" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+  github-release:
+    # After both registries have the release: a GitHub Release with the
+    # CHANGELOG section as notes and the dists + SBOM attached (eval bundles
+    # can be added to it later, see BENCHMARKS.md).
+    needs: [publish-pypi, publish-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: .
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Notes: this version's CHANGELOG section, else GitHub's generated notes.
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md | tr -d '\r' > notes.md
+          flags=(--verify-tag --title "$GITHUB_REF_NAME")
+          if [ -s notes.md ]; then flags+=(--notes-file notes.md); else flags+=(--generate-notes); fi
+          if [[ "$version" =~ (a|b|rc|\.dev)[0-9]+$ ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* sbom.cdx.json "${flags[@]}"
