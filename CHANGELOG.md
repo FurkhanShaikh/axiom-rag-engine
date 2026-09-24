@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`--record` writes the enforced verifier baseline in one step.** `semantic_verifier_eval.py --model <verifier> --record` refuses samples under 200 (now the default `--limit`) and sets floors at the run's 95% Wilson lower bounds, so the first keyed run activates the gate. A baseline recorded on a different model is reported, not enforced (`openrouter/openai/gpt-4o-mini` counts as `gpt-4o-mini`).
 - **The nightly job uses whichever key is configured** (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, choosing the matching verifier), and fails when no key is set once the baseline is enforced.
 
+### Changed — LLM concurrency pools
+- **Verification calls no longer queue behind synthesis calls.** One process-wide semaphore (`AXIOM_MAX_CONCURRENT_LLM`) covered every LLM call, so slow synthesis calls could hold every slot while cheap verifier calls waited. Synthesis, verification (semantic, corroboration, contradiction) and auxiliary calls (reranker, embeddings) now have separate pools. `AXIOM_MAX_CONCURRENT_LLM` bounds synthesis and auxiliary calls as before; the new `AXIOM_MAX_CONCURRENT_VERIFIER_LLM` bounds verification (unset = the same value). Total in-flight calls can therefore reach the sum of the pools. The limits remain per process.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

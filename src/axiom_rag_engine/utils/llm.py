@@ -205,31 +205,45 @@ def get_llm_usage_snapshot() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Shared LLM concurrency limiter
+# LLM concurrency limiters
 # ---------------------------------------------------------------------------
-# asyncio.Semaphore — limits total concurrent in-flight acompletion() calls
-# across all nodes so we don't breach provider rate limits.
-#
-# Python 3.10+ asyncio primitives no longer bind to a running event loop at
-# construction time, so it is safe to create the semaphore at module level.
-# This project requires Python >= 3.11, so the old lazy-init pattern that
-# worked around the "no running event loop" error is no longer needed.
+# One asyncio.Semaphore per pool bounds in-flight calls to protect provider
+# rate limits. Pools are separate so a few slow synthesis calls cannot hold
+# every slot while cheap verification calls — often on another provider, and
+# 10-30 per request — wait behind them.
 
-_llm_semaphore: asyncio.Semaphore | None = None
+# node -> pool; nodes not listed share the "auxiliary" pool.
+_POOL_BY_NODE = {
+    "synthesizer": "synthesis",
+    "semantic": "verification",
+    "corroboration": "verification",
+    "contradiction": "verification",
+}
+
+_llm_semaphores: dict[str, asyncio.Semaphore] = {}
 
 
-def get_llm_semaphore() -> asyncio.Semaphore:
-    """Return the shared asyncio.Semaphore for LLM concurrency limiting.
+def llm_pool(node: str) -> str:
+    """The concurrency pool a node's calls are limited in."""
+    return _POOL_BY_NODE.get(node, "auxiliary")
+
+
+def get_llm_semaphore(pool: str = "synthesis") -> asyncio.Semaphore:
+    """Return the semaphore limiting in-flight LLM calls in ``pool``.
 
     Lazily instantiated so tests / callers can change
-    ``AXIOM_MAX_CONCURRENT_LLM`` via env before the first call. Deliberately
-    process-wide (``get_settings``, not the request's): it bounds calls across
-    every app in the process to protect provider rate limits.
+    ``AXIOM_MAX_CONCURRENT_LLM`` / ``AXIOM_MAX_CONCURRENT_VERIFIER_LLM`` via env
+    before the first call. Deliberately process-wide (``get_settings``, not the
+    request's): it bounds calls across every app in the process.
     """
-    global _llm_semaphore
-    if _llm_semaphore is None:
-        _llm_semaphore = asyncio.Semaphore(get_settings().max_concurrent_llm)
-    return _llm_semaphore
+    semaphore = _llm_semaphores.get(pool)
+    if semaphore is None:
+        settings = get_settings()
+        limit = settings.max_concurrent_llm
+        if pool == "verification" and settings.max_concurrent_verifier_llm:
+            limit = settings.max_concurrent_verifier_llm
+        semaphore = _llm_semaphores[pool] = asyncio.Semaphore(limit)
+    return semaphore
 
 
 # (schema name, JSON Schema) for structured output.
@@ -373,7 +387,7 @@ async def _with_retry(node: str, model: str, call: Callable[[], Awaitable[Any]])
     attempt = 0
     while True:
         try:
-            async with get_llm_semaphore():
+            async with get_llm_semaphore(llm_pool(node)):
                 return await call()
         except Exception as exc:
             if attempt >= settings.llm_max_retries or not is_transient_llm_error(exc):
@@ -422,7 +436,7 @@ async def call_llm(
       - the per-request call budget is consumed *before* the provider is hit
         (``LLMBudgetExceededError`` propagates unwrapped — callers decide whether
         to degrade or abort, and the endpoint maps it to HTTP 422);
-      - the global concurrency semaphore bounds in-flight calls;
+      - the node's concurrency pool bounds in-flight calls (``llm_pool``);
       - transient provider failures (rate limit, timeout, 5xx) are retried up
         to ``AXIOM_LLM_MAX_RETRIES`` times with backoff, within one budget unit;
       - duration, tokens, and cost are recorded under ``node``;

@@ -350,7 +350,19 @@ class Settings(BaseSettings):
     max_concurrent_llm: int = Field(
         default=5,
         ge=1,
-        description="Maximum concurrent in-flight LLM calls across all requests.",
+        description=(
+            "Maximum concurrent in-flight synthesis LLM calls across all requests; also "
+            "bounds auxiliary calls (reranker, embeddings) in their own pool."
+        ),
+    )
+    max_concurrent_verifier_llm: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum concurrent in-flight verification calls (semantic, corroboration, "
+            "contradiction), in a pool separate from synthesis so cheap checks never "
+            "queue behind slow synthesis calls. Unset = max_concurrent_llm."
+        ),
     )
     llm_timeout_seconds: float = Field(
         default=120.0,
