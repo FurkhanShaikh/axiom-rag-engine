@@ -135,8 +135,8 @@ def create_app(
         version=VERSION,
         description="Configuration-driven Agentic RAG with 6-tier citation verification.",
         lifespan=lifespan,
-        docs_url="/docs" if config.docs_enabled else None,
-        redoc_url="/redoc" if config.docs_enabled else None,
+        docs_url="/docs" if config.docs_on() else None,
+        redoc_url="/redoc" if config.docs_on() else None,
     )
     app.state.settings_override = settings
     app.state.search_backend_override = search_backend

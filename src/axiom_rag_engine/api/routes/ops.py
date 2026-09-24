@@ -44,7 +44,7 @@ async def health_ready(request: Request) -> Response:
             content={"status": "not_ready", "detail": "API keys are not configured."},
         )
     if (
-        _auth_required(settings)
+        settings.is_production()
         and services.search_backend_mode == "mock"
         and not settings.allow_mock_search
     ):

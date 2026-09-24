@@ -145,7 +145,7 @@ def resolve_llm_defaults(settings: Settings) -> tuple[str, str]:
         # Only fail-closed in production. In dev/test envs we fall back to the
         # configured defaults so the app can boot without provider credentials —
         # individual requests will surface the missing-key error at call time.
-        if settings.auth_required():
+        if settings.is_production():
             raise RuntimeError(
                 "No LLM provider is available. Configure one of:\n"
                 "  • ANTHROPIC_API_KEY  (recommended for production)\n"
@@ -293,7 +293,7 @@ def build_search_backend(settings: Settings, corpus_store: CorpusStore | None) -
                 "AXIOM_RETRIEVAL_SOURCE=both but TAVILY_API_KEY is not set — "
                 "serving corpus results only."
             )
-        elif _auth_required(settings) and not settings.allow_mock_search:
+        elif settings.is_production() and not settings.allow_mock_search:
             raise RuntimeError(
                 "TAVILY_API_KEY must be configured in non-development environments unless "
                 "AXIOM_ALLOW_MOCK_SEARCH=true."
