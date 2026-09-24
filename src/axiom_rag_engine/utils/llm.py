@@ -17,6 +17,7 @@ import logging
 import random
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from axiom_rag_engine.config.settings import current_settings, get_settings
@@ -92,24 +93,20 @@ def consume_llm_budget(node: str) -> None:
 
 def record_llm_usage(usage: Any, node: str, model: str | None = None) -> None:
     """
-    Accumulate token counts + cost from a completed LLM response and enforce
-    the token cap. Also emits Prometheus counters (``axiom_llm_tokens_total``,
-    ``axiom_llm_cost_usd_total``) when ``model`` is provided.
+    Record token counts + cost from a completed LLM or embedding response.
 
-    Call this immediately after a successful ``litellm.acompletion()`` call:
-        record_llm_usage(response.usage, "synthesizer", model)
+    Always emits the Prometheus counters (``axiom_llm_tokens_total``,
+    ``axiom_llm_cost_usd_total``) when ``model`` is provided — including for
+    work outside a request budget, such as document ingestion. When a
+    per-request budget is active it also accumulates the usage there and
+    enforces the token cap.
 
-    No-op when no budget has been initialized (unit tests / direct-call paths).
     Missing provider usage is tolerated — only counters with non-zero data are
     updated. Cost is best-effort via ``litellm.completion_cost``; Ollama and
     other local backends will report 0.
 
     Raises LLMBudgetExceededError if the cumulative token count exceeds the cap.
     """
-    budget = _llm_budget_ctx.get()
-    if budget is None:
-        return
-
     prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0) if usage is not None else 0
     completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0) if usage is not None else 0
     total_tokens = int(getattr(usage, "total_tokens", 0) or 0) if usage is not None else 0
@@ -132,6 +129,28 @@ def record_llm_usage(usage: Any, node: str, model: str | None = None) -> None:
                 or 0.0
             )
 
+    if model is not None:
+        # Label cardinality is bounded by safe_model_label. Never let metrics
+        # emission break a request.
+        with contextlib.suppress(Exception):
+            from axiom_rag_engine.config.observability import (
+                LLM_COST_USD_TOTAL,
+                LLM_TOKENS_TOTAL,
+                safe_model_label,
+            )
+
+            label = safe_model_label(model)
+            if prompt_tokens:
+                LLM_TOKENS_TOTAL.labels(model=label, kind="prompt").inc(prompt_tokens)
+            if completion_tokens:
+                LLM_TOKENS_TOTAL.labels(model=label, kind="completion").inc(completion_tokens)
+            if cost_usd:
+                LLM_COST_USD_TOTAL.labels(model=label).inc(cost_usd)
+
+    budget = _llm_budget_ctx.get()
+    if budget is None:
+        return
+
     budget["calls"] = budget.get("calls", 0) + 1
     budget["prompt_tokens"] = budget.get("prompt_tokens", 0) + prompt_tokens
     budget["completion_tokens"] = budget.get("completion_tokens", 0) + completion_tokens
@@ -148,23 +167,6 @@ def record_llm_usage(usage: Any, node: str, model: str | None = None) -> None:
         row["prompt_tokens"] += prompt_tokens
         row["completion_tokens"] += completion_tokens
         row["cost_usd"] += cost_usd
-
-        # Emit Prometheus counters; label cardinality is bounded by safe_model_label.
-        # Never let metrics emission break a request.
-        with contextlib.suppress(Exception):
-            from axiom_rag_engine.config.observability import (
-                LLM_COST_USD_TOTAL,
-                LLM_TOKENS_TOTAL,
-                safe_model_label,
-            )
-
-            label = safe_model_label(model)
-            if prompt_tokens:
-                LLM_TOKENS_TOTAL.labels(model=label, kind="prompt").inc(prompt_tokens)
-            if completion_tokens:
-                LLM_TOKENS_TOTAL.labels(model=label, kind="completion").inc(completion_tokens)
-            if cost_usd:
-                LLM_COST_USD_TOTAL.labels(model=label).inc(cost_usd)
 
     token_cap: int = int(budget.get("token_cap", 0) or 0)
     if token_cap > 0 and budget["tokens_used"] > token_cap:
@@ -344,38 +346,59 @@ def _retry_delay(exc: BaseException, attempt: int, max_wait: float) -> float:
     return random.uniform(0.0, min(max_wait, _RETRY_BASE_SECONDS * 2**attempt))  # noqa: S311
 
 
-async def _acompletion_with_retry(node: str, model: str, kwargs: dict[str, Any]) -> Any:
-    """``litellm.acompletion`` with retries for transient provider failures.
+def _log_retry(
+    node: str, model: str, exc: BaseException, attempt: int, of: int, delay: float
+) -> None:
+    from axiom_rag_engine.config.observability import LLM_RETRIES, safe_model_label
+
+    LLM_RETRIES.labels(node=node, model=safe_model_label(model)).inc()
+    logger.warning(
+        "Transient %s error from %s (%s); retry %d/%d in %.1fs.",
+        node,
+        model,
+        type(exc).__name__,
+        attempt,
+        of,
+        delay,
+    )
+
+
+async def _with_retry(node: str, model: str, call: Callable[[], Awaitable[Any]]) -> Any:
+    """Await ``call()`` with retries for transient provider failures.
 
     The concurrency semaphore is held per attempt, never across a backoff sleep,
     so a throttled call does not block other requests while it waits.
     """
-    import litellm
-
-    from axiom_rag_engine.config.observability import LLM_RETRIES, safe_model_label
-
     settings = current_settings()
     attempt = 0
     while True:
         try:
             async with get_llm_semaphore():
-                return await litellm.acompletion(**kwargs)
+                return await call()
         except Exception as exc:
             if attempt >= settings.llm_max_retries or not is_transient_llm_error(exc):
                 raise
             delay = _retry_delay(exc, attempt, settings.llm_retry_max_wait_seconds)
             attempt += 1
-            LLM_RETRIES.labels(node=node, model=safe_model_label(model)).inc()
-            logger.warning(
-                "Transient %s error from %s (%s); retry %d/%d in %.1fs.",
-                node,
-                model,
-                type(exc).__name__,
-                attempt,
-                settings.llm_max_retries,
-                delay,
-            )
+            _log_retry(node, model, exc, attempt, settings.llm_max_retries, delay)
             await asyncio.sleep(delay)
+
+
+def _with_retry_sync(node: str, model: str, call: Callable[[], Any]) -> Any:
+    """Blocking twin of :func:`_with_retry` for code already off the event loop
+    (worker threads). The asyncio semaphore cannot be used from a thread."""
+    settings = current_settings()
+    attempt = 0
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            if attempt >= settings.llm_max_retries or not is_transient_llm_error(exc):
+                raise
+            delay = _retry_delay(exc, attempt, settings.llm_retry_max_wait_seconds)
+            attempt += 1
+            _log_retry(node, model, exc, attempt, settings.llm_max_retries, delay)
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +432,8 @@ async def call_llm(
     Non-transient provider errors, and transient ones that outlast the retries,
     propagate unchanged. ``None`` content becomes ``""``.
     """
+    import litellm
+
     from axiom_rag_engine.config.observability import (
         LLM_CALL_DURATION,
         get_tracer,
@@ -428,12 +453,54 @@ async def call_llm(
     with get_tracer().start_as_current_span(f"{node}.llm_call", attributes={"model": model}):
         consume_llm_budget(node)
         start = time.monotonic()
-        response = await _acompletion_with_retry(node, model, kwargs)
+        response = await _with_retry(node, model, lambda: litellm.acompletion(**kwargs))
         LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
             time.monotonic() - start
         )
         record_llm_usage(getattr(response, "usage", None), node, model)
     return str(response.choices[0].message.content or "")
+
+
+# ---------------------------------------------------------------------------
+# Embedding calls — same budget, concurrency, retry, and usage policy
+# ---------------------------------------------------------------------------
+
+
+async def call_embedding(node: str, model: str, kwargs: dict[str, Any]) -> Any:
+    """``litellm.aembedding`` under the shared call policy (see :func:`call_llm`).
+
+    One batched embedding request consumes one unit of per-request budget; its
+    tokens and cost are recorded under ``node``.
+    """
+    import litellm
+
+    from axiom_rag_engine.config.observability import LLM_CALL_DURATION, safe_model_label
+
+    consume_llm_budget(node)
+    start = time.monotonic()
+    response = await _with_retry(node, model, lambda: litellm.aembedding(**kwargs))
+    LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
+        time.monotonic() - start
+    )
+    record_llm_usage(getattr(response, "usage", None), node, model)
+    return response
+
+
+def call_embedding_sync(node: str, model: str, kwargs: dict[str, Any]) -> Any:
+    """Blocking :func:`call_embedding` for worker threads (``asyncio.to_thread``
+    copies the request context, so the request budget still applies)."""
+    import litellm
+
+    from axiom_rag_engine.config.observability import LLM_CALL_DURATION, safe_model_label
+
+    consume_llm_budget(node)
+    start = time.monotonic()
+    response = _with_retry_sync(node, model, lambda: litellm.embedding(**kwargs))
+    LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
+        time.monotonic() - start
+    )
+    record_llm_usage(getattr(response, "usage", None), node, model)
+    return response
 
 
 # Caps the O(n) salvage scan so a runaway or adversarial response cannot burn
