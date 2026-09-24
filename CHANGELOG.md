@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Rate limits are shared across replicas through Redis.** With `AXIOM_REDIS_URL` set, slowapi's counters live in Redis (prefix `axiom:ratelimit`, 0.5 s socket timeouts), so N replicas enforce one limit instead of N. While Redis is unreachable each replica falls back to its own in-memory counters. Without Redis, or without the `redis` extra, limits stay per process (logged at startup).
 - **README → Scaling out** lists what replicas share and what they don't (LLM concurrency limits, audit trails and the SQLite corpus are per process; run a single corpus writer). The Dockerfile no longer implies the rest is shared.
 
+### Changed — retrieval latency (RET-3)
+- **Search backends are queried concurrently.** With `retrieval_source=both`, web search and the corpus ran one after the other, so their latencies added up; they now run in parallel (merge order unchanged: web first), each in a copy of the request's context so it sees the serving app's settings.
+- **Tavily calls carry an explicit timeout**, `AXIOM_SEARCH_TIMEOUT_SECONDS` (default 20 s). The client default was 60 s, retried three times.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

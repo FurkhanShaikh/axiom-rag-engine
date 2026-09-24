@@ -182,6 +182,15 @@ class Settings(BaseSettings):
         default=False,
         description="If true, allow MockSearchBackend in non-development envs.",
     )
+    search_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        le=300,
+        description=(
+            "Timeout for one web search request (Tavily). A failed search is retried "
+            "twice, so a stalled provider costs at most about three times this."
+        ),
+    )
     fetch_full_pages: bool = Field(
         default=True,
         description=(

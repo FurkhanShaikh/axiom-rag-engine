@@ -280,6 +280,7 @@ def build_search_backend(settings: Settings, corpus_store: CorpusStore | None) -
                     api_key=tavily_key,
                     fetch_full_pages=settings.fetch_full_pages,
                     max_raw_content_chars=settings.max_raw_content_chars,
+                    timeout_seconds=settings.search_timeout_seconds,
                 )
             )
             modes.append("tavily")

@@ -21,7 +21,9 @@ here would bind LiteLLM's cached HTTP sessions to throwaway event loops.
 
 from __future__ import annotations
 
+import contextvars
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote
 
@@ -98,23 +100,36 @@ class CorpusSearchBackend:
 class CompositeSearchBackend:
     """Fan a query out to several backends and concatenate their results.
 
-    Order is preserved (earlier backends first). The retriever deduplicates the
-    merged stream by URL and content hash, so backends returning the same source
-    do not double-count. A single backend raising does not sink the others.
+    Backends are queried concurrently, so a query takes about as long as the
+    slowest backend rather than the sum of all of them. Order is preserved
+    (earlier backends first) regardless of which finishes first. The retriever
+    deduplicates the merged stream by URL and content hash, so backends
+    returning the same source do not double-count. A single backend raising
+    does not sink the others.
     """
 
     def __init__(self, backends: list[SearchBackend]) -> None:
         self._backends = backends
 
+    def _search_one(self, backend: SearchBackend, query: str) -> list[dict[str, Any]]:
+        try:
+            return backend.search(query)
+        except Exception:
+            logger.exception(
+                "Backend %s failed for %r; continuing with the rest.",
+                type(backend).__name__,
+                query,
+            )
+            return []
+
     def search(self, query: str) -> list[dict[str, Any]]:
-        merged: list[dict[str, Any]] = []
-        for backend in self._backends:
-            try:
-                merged.extend(backend.search(query))
-            except Exception:
-                logger.exception(
-                    "Backend %s failed for %r; continuing with the rest.",
-                    type(backend).__name__,
-                    query,
-                )
-        return merged
+        if len(self._backends) == 1:
+            return self._search_one(self._backends[0], query)
+        with ThreadPoolExecutor(max_workers=len(self._backends)) as pool:
+            # Each worker runs in a copy of this context, so backends still see
+            # the request's settings (current_settings is a ContextVar).
+            futures = [
+                pool.submit(contextvars.copy_context().run, self._search_one, backend, query)
+                for backend in self._backends
+            ]
+            return [result for future in futures for result in future.result()]

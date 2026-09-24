@@ -88,6 +88,7 @@ resolved configuration.
 | `AXIOM_DOCS_ENABLED` | _(auto)_ | Serve /docs and /redoc. Unset: on when auth is disabled, off when auth is required. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
 | `AXIOM_CORROBORATION_ENABLED` | `false` | When true, Tier 2 requires ≥2 sources to *corroborate* the claim (an extra verifier call), not just cite ≥2 domains. See [Verification tiers](#verification-tiers). |
+| `AXIOM_SEARCH_TIMEOUT_SECONDS` | `20` | Timeout for one web search request (Tavily). A failed search is retried twice. |
 | `AXIOM_FETCH_FULL_PAGES` | `true` | Verify citations against full page text rather than search snippets. See [Verification sources](#verification-sources). |
 | `AXIOM_MAX_RAW_CONTENT_CHARS` | `200000` | Per-document cap on full page text. Oversized pages are truncated, not dropped. |
 | `AXIOM_AUDIT_RETENTION` | `0` | Retain the last N audit trails in memory for `/v1/audits/{id}`. |
