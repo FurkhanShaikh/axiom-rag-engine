@@ -22,7 +22,6 @@ import argparse
 import asyncio
 import json
 import random
-import re
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -111,51 +110,20 @@ class Record:
     correct: bool
     failure_reason: str | None
     latency_s: float
-
-
-# Transient provider throttling (HTTP 429) is not a verifier error — it says
-# nothing about whether the verifier judges correctly, so retrying it keeps the
-# measurement honest. Free/shared model endpoints throttle aggressively with
-# short Retry-After windows, so an eval that counted every 429 as an "error"
-# would report a meaningless error_rate.
-_MAX_RATE_LIMIT_RETRIES = 4
-_MAX_BACKOFF_SECONDS = 40.0
-
-
-def _is_rate_limited(exc: Exception) -> bool:
-    name = type(exc).__name__.lower()
-    return "ratelimit" in name or "429" in str(exc)
-
-
-def _retry_after_seconds(exc: Exception, attempt: int) -> float:
-    """Honor the provider's Retry-After if present, else exponential backoff."""
-    match = re.search(r'"retry_after_seconds"\s*:\s*([0-9.]+)', str(exc))
-    if match:
-        return min(float(match.group(1)) + 1.0, _MAX_BACKOFF_SECONDS)
-    return min(2.0**attempt, _MAX_BACKOFF_SECONDS)
-
-
-async def _verify_with_retry(**kwargs: Any) -> tuple[Any, str | None]:
-    """Call the production verifier, retrying only on transient rate limits."""
-    from axiom_rag_engine.nodes.semantic import _verify_citation
-
-    last_exc: Exception | None = None
-    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-        try:
-            return await _verify_citation(**kwargs)
-        except Exception as exc:
-            last_exc = exc
-            if not _is_rate_limited(exc) or attempt == _MAX_RATE_LIMIT_RETRIES:
-                raise
-            await asyncio.sleep(_retry_after_seconds(exc, attempt))
-    raise last_exc  # unreachable; for type-checkers
+    # For errors: a rate limit / timeout / 5xx that outlasted the production
+    # retry policy (infrastructure), as opposed to a parse or contract failure.
+    transient: bool = False
 
 
 async def _judge(example: Example, model: str) -> Record:
     """Run one example through the production semantic-verification path."""
     # Private import is deliberate: the eval must exercise the exact code the
-    # verifier node runs, not a reimplementation of its prompt.
+    # verifier node runs, not a reimplementation of its prompt. Transient
+    # provider errors are retried by the production call path itself
+    # (AXIOM_LLM_MAX_RETRIES), so the eval measures what production does.
     from axiom_rag_engine.models import Citation
+    from axiom_rag_engine.nodes.semantic import _verify_citation
+    from axiom_rag_engine.utils.llm import is_transient_llm_error
 
     citation = Citation(
         citation_id="eval_cite_1",
@@ -172,8 +140,9 @@ async def _judge(example: Example, model: str) -> Record:
     }
     expected = "passed" if example.label == "SUPPORT" else "failed"
     start = time.monotonic()
+    transient = False
     try:
-        verification, _reason = await _verify_with_retry(
+        verification, _reason = await _verify_citation(
             claim_text=example.claim,
             citation=citation,
             chunk_lookup=chunk_lookup,
@@ -185,6 +154,7 @@ async def _judge(example: Example, model: str) -> Record:
     except Exception as exc:  # LLM/parse failure — count, don't abort the run
         got = "error"
         failure_reason = f"{type(exc).__name__}: {exc}"
+        transient = is_transient_llm_error(exc)
     return Record(
         example_id=example.example_id,
         label=example.label,
@@ -193,7 +163,35 @@ async def _judge(example: Example, model: str) -> Record:
         correct=(got == expected),
         failure_reason=failure_reason,
         latency_s=round(time.monotonic() - start, 2),
+        transient=transient,
     )
+
+
+def _provider_retries() -> float:
+    """Retries the production call path has made for semantic checks so far."""
+    from prometheus_client import REGISTRY
+
+    total = 0.0
+    for metric in REGISTRY.collect():
+        if metric.name == "axiom_llm_retries":
+            total += sum(
+                s.value
+                for s in metric.samples
+                if s.name.endswith("_total") and s.labels.get("node") == "semantic"
+            )
+    return total
+
+
+def _retry_policy() -> dict[str, float]:
+    """The retry settings in force, recorded with the results: an error rate is
+    only comparable between runs made under the same policy."""
+    from axiom_rag_engine.config.settings import current_settings
+
+    settings = current_settings()
+    return {
+        "max_retries": settings.llm_max_retries,
+        "max_wait_seconds": settings.llm_retry_max_wait_seconds,
+    }
 
 
 def summarize(records: list[Record]) -> dict[str, Any]:
@@ -212,6 +210,7 @@ def summarize(records: list[Record]) -> dict[str, Any]:
         "total": len(records),
         "scored": len(scored),
         "errors": errors,
+        "transient_errors": sum(1 for r in records if r.got == "error" and r.transient),
         "error_rate": round(error_rate, 4),
         "accuracy": round((tp + tn) / len(scored), 4) if scored else 0.0,
         "unfaithful_precision": round(precision, 4),
@@ -245,8 +244,11 @@ async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path
     sample = examples[:limit] if limit else examples
     _echo(f"Evaluating {len(sample)} examples with model={model} ...")
 
+    retries_before = _provider_retries()
     records = list(await asyncio.gather(*[_judge(e, model) for e in sample]))
     summary = summarize(records)
+    summary["provider_retries"] = int(_provider_retries() - retries_before)
+    summary["retry_policy"] = _retry_policy()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"semantic-{time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -271,7 +273,11 @@ async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path
     _echo(f"  unfaithful recall    : {summary['unfaithful_recall']}")
     _echo(f"  unfaithful f1        : {summary['unfaithful_f1']}")
     _echo(f"  confusion            : {summary['confusion']}")
-    _echo(f"  errors               : {summary['errors']}/{summary['total']}")
+    _echo(
+        f"  errors               : {summary['errors']}/{summary['total']} "
+        f"({summary['transient_errors']} transient, after "
+        f"{summary['provider_retries']} provider retries)"
+    )
     _echo()
     _echo(f"Full records: {out_path}")
 
