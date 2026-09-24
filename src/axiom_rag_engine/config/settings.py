@@ -277,6 +277,19 @@ class Settings(BaseSettings):
         ge=1,
         description="Cap on chunks stored per ingested document (guards a runaway upload).",
     )
+    corpus_max_pdf_pages: int = Field(
+        default=500,
+        ge=1,
+        description="Uploaded PDFs with more pages are refused (422) before any page is parsed.",
+    )
+    corpus_pdf_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Wall-clock limit for extracting one PDF. Extraction runs in a child process "
+            "that is killed on overrun, so a crafted file cannot pin a worker."
+        ),
+    )
     max_document_bytes: int = Field(
         default=10_485_760,  # 10 MiB
         ge=1,
