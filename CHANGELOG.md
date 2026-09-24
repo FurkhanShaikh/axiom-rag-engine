@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — CI covers everything Dependabot can bump
+- **Compose smoke test.** A `compose-smoke` job starts the whole docker-compose stack and checks each service: the engine is ready with Redis as its cache, reaches Ollama over the compose network, Prometheus is scraping it, and Grafana is healthy with the dashboard and Prometheus datasource provisioned (`.github/scripts/compose-smoke.sh`). Image bumps to Redis, Ollama, Prometheus or Grafana were previously untested.
+- **Tests on the image's Python.** `test-image-python` reads the Python version from the Dockerfile and runs the suite on it, so a base-image bump is tested on the version it would ship even when it is outside the 3.11–3.13 matrix.
+- The image smoke test takes its Redis image from docker-compose.yml, so the two cannot drift; Dependabot groups Python minor and patch bumps into one PR (separate PRs conflicted on `uv.lock`).
+
 ### Added — release pipeline (CD)
 - **A version tag now publishes the Docker image and a GitHub Release**, alongside the existing PyPI upload. The image is built with OCI source/version/revision labels, scanned with Trivy (fixable critical CVEs block the push), and pushed to `ghcr.io/<owner>/axiom-rag-engine:<version>`; `:latest` moves only for final releases. The release carries this version's CHANGELOG section as notes (GitHub's generated notes if there is none), the wheel and sdist, and the SBOM, and is marked pre-release for `a`/`b`/`rc`/`.dev` versions. `publish.yml` now defaults to a read-only token; only the image job gets `packages: write` and only the release job `contents: write`. Plain `docker` and `gh` CLI, no new third-party actions.
 
