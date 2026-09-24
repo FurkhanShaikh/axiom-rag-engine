@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from axiom_rag_engine.api.sse import _apply_node_update, _sse, _stage_metadata, stream_pipeline
+from axiom_rag_engine.api.sse import _sse, _stage_metadata, stream_pipeline
 from axiom_rag_engine.models import AxiomRequest
 
 # ---------------------------------------------------------------------------
@@ -52,19 +52,6 @@ def test_stage_metadata_verifier_complete() -> None:
     assert meta["loop_count"] == 2
 
 
-def test_apply_node_update_appends_audit_trail() -> None:
-    state: dict[str, Any] = {"audit_trail": [{"e": 1}], "foo": "old"}
-    _apply_node_update(state, {"audit_trail": [{"e": 2}], "foo": "new"})
-    assert state["audit_trail"] == [{"e": 1}, {"e": 2}]
-    assert state["foo"] == "new"
-
-
-def test_apply_node_update_handles_missing_audit_trail() -> None:
-    state: dict[str, Any] = {}
-    _apply_node_update(state, {"audit_trail": [{"e": 1}]})
-    assert state["audit_trail"] == [{"e": 1}]
-
-
 # ---------------------------------------------------------------------------
 # stream_pipeline integration (mock engine)
 # ---------------------------------------------------------------------------
@@ -92,10 +79,19 @@ async def _collect(gen) -> list[dict]:
 
 
 def _mock_engine(events: list[dict]) -> Any:
-    """Build a mock LangGraph engine whose astream_events yields the given events."""
+    """Build a mock LangGraph engine whose astream_events yields the given events.
 
-    async def _astream_events(state, *, version):
+    Like LangGraph, each node start carries the node's input state (the initial
+    state with every earlier node update applied).
+    """
+
+    async def _astream_events(state, **_kwargs):
+        merged = dict(state)
         for e in events:
+            if e["event"] == "on_chain_start":
+                e = {**e, "data": {**e["data"], "input": dict(merged)}}
+            elif e["event"] == "on_chain_end":
+                merged.update(e["data"].get("output") or {})
             yield e
 
     engine = MagicMock()
@@ -185,7 +181,7 @@ async def test_client_disconnect_cancels_inflight_pipeline() -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def _astream_events(state, *, version):
+    async def _astream_events(state, **_kwargs):
         yield _langgraph_event("on_chain_start", "retriever")
         started.set()
         try:
@@ -311,7 +307,7 @@ async def test_stream_pipeline_emits_loop_event_on_re_retrieval() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_pipeline_emits_error_on_exception() -> None:
-    async def _bad_stream(state, *, version):
+    async def _bad_stream(state, **_kwargs):
         raise RuntimeError("synthetic failure")
         yield  # make it an async generator
 

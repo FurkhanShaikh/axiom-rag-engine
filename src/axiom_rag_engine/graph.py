@@ -15,10 +15,12 @@ DAG topology:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -295,6 +297,145 @@ def finish_with_best_pass(state: GraphState, reason: str) -> dict[str, Any] | No
     }
 
 
+# ---------------------------------------------------------------------------
+# Running a request: one path for the JSON and the streaming endpoint
+# ---------------------------------------------------------------------------
+
+# Graph nodes reported as run events (routing helpers and the root are not).
+PIPELINE_NODES = frozenset(
+    {"retriever", "re_retriever", "scorer", "ranker", "synthesizer", "verifier"}
+)
+
+
+@dataclass(frozen=True)
+class NodeStarted:
+    node: str
+    state: dict[str, Any]  # the merged state LangGraph handed to the node
+
+
+@dataclass(frozen=True)
+class NodeFinished:
+    node: str
+    update: dict[str, Any]  # the node's own state update
+    elapsed_ms: int
+
+
+@dataclass(frozen=True)
+class Keepalive:
+    """Nothing happened for ``keepalive_seconds`` (streams send a comment)."""
+
+
+@dataclass(frozen=True)
+class RunFinished:
+    state: dict[str, Any]  # the final state, as LangGraph reports it
+
+
+RunEvent = NodeStarted | NodeFinished | Keepalive | RunFinished
+
+
+async def run_events(
+    engine: Any,
+    initial_state: GraphState,
+    run_config: dict[str, Any] | None,
+    deadline_seconds: float,
+    progress: PipelineProgress | None = None,
+    keepalive_seconds: float | None = None,
+) -> AsyncIterator[RunEvent]:
+    """Run the graph once and report it as events, ending with ``RunFinished``.
+
+    Both endpoints run requests through this: the JSON endpoint waits for
+    ``RunFinished``, the stream turns every event into a frame. State is always
+    LangGraph's own (each node's input, and the root's final output), never
+    re-derived from node updates. ``progress`` tracks the latest checkpoint and
+    the running node, which failure trails and deadlines use.
+
+    A wall-clock ``deadline_seconds`` (0 = none) bounds the run: on expiry the
+    best verified pass is the result (``halt_reason="deadline"``). Closing the
+    iterator early (a client disconnect) cancels the in-flight graph step, so
+    an abandoned run stops spending LLM budget.
+
+    Raises:
+        PipelineDeadlineError: the deadline expired before any verified pass.
+        Any exception the graph raises (after ``progress`` is up to date).
+    """
+    progress = progress if progress is not None else PipelineProgress(initial_state)
+    config = dict(run_config or {})
+    config["configurable"] = {**(config.get("configurable") or {}), _PROGRESS_KEY: progress}
+    deadline_at = time.monotonic() + deadline_seconds if deadline_seconds > 0 else None
+    started_at: dict[str, float] = {}
+    final_state: dict[str, Any] | None = None
+    deadline_hit = False
+
+    events = engine.astream_events(initial_state, config=config, version="v2").__aiter__()
+    pending: asyncio.Future[Any] | None = None
+    timer: asyncio.Future[Any] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(events.__anext__())
+            wait_for = keepalive_seconds
+            if deadline_at is not None:
+                remaining = max(0.0, deadline_at - time.monotonic())
+                wait_for = remaining if wait_for is None else min(wait_for, remaining)
+            if wait_for is not None:
+                # Race the next graph event against the keepalive/deadline timer
+                # rather than cancelling __anext__, which would abort the run.
+                timer = asyncio.ensure_future(asyncio.sleep(wait_for))
+                await asyncio.wait({pending, timer}, return_when=asyncio.FIRST_COMPLETED)
+                timer.cancel()
+                timer = None
+                if not pending.done():
+                    if deadline_at is not None and time.monotonic() >= deadline_at:
+                        deadline_hit = True
+                        break  # the finally below cancels the in-flight step
+                    yield Keepalive()
+                    continue
+            try:
+                event = await pending
+            except StopAsyncIteration:
+                pending = None
+                break
+            pending = None
+
+            kind: str = event.get("event", "")
+            name: str = event.get("name", "")
+            data: dict[str, Any] = event.get("data") or {}
+            if name in PIPELINE_NODES:
+                if kind == "on_chain_start":
+                    started_at[name] = time.monotonic()
+                    node_input = data.get("input")
+                    yield NodeStarted(name, node_input if isinstance(node_input, dict) else {})
+                elif kind == "on_chain_end":
+                    begun = started_at.get(name, time.monotonic())
+                    output = data.get("output")
+                    yield NodeFinished(
+                        name,
+                        output if isinstance(output, dict) else {},
+                        round((time.monotonic() - begun) * 1000),
+                    )
+            elif kind == "on_chain_end" and not event.get("parent_ids"):
+                output = data.get("output")
+                if isinstance(output, dict):
+                    final_state = output  # the root graph's final state
+    finally:
+        if timer is not None:
+            timer.cancel()
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with contextlib.suppress(BaseException):
+                await pending
+
+    if deadline_hit:
+        final = finish_with_best_pass(progress.state, "deadline")
+        if final is None:
+            raise PipelineDeadlineError(
+                f"Request deadline of {deadline_seconds:g}s expired before any verified pass."
+            )
+        final_state = final
+    # A graph that reports no root output (test doubles) ends at its last checkpoint.
+    yield RunFinished(final_state if final_state is not None else dict(progress.state))
+
+
 async def run_pipeline(
     engine: Any,
     initial_state: GraphState,
@@ -302,34 +443,13 @@ async def run_pipeline(
     deadline_seconds: float,
     progress: PipelineProgress | None = None,
 ) -> dict[str, Any]:
-    """Run the graph under a wall-clock deadline (0 disables it).
-
-    When the deadline expires after a verified pass, the best pass is returned
-    as a halted run (``halt_reason="deadline"``) instead of losing it. Pass
-    ``progress`` to see how far a failed run got.
-
-    Raises:
-        PipelineDeadlineError: the deadline expired before any verified pass.
-    """
-    progress = progress or PipelineProgress(initial_state)
-    config = dict(run_config or {})
-    config["configurable"] = {**(config.get("configurable") or {}), _PROGRESS_KEY: progress}
-    if deadline_seconds <= 0:
-        return cast(dict[str, Any], await engine.ainvoke(initial_state, config=config))
-
-    deadline = asyncio.timeout(deadline_seconds)
-    try:
-        async with deadline:
-            return cast(dict[str, Any], await engine.ainvoke(initial_state, config=config))
-    except TimeoutError:
-        if not deadline.expired():
-            raise  # a timeout raised inside the pipeline, not the deadline
-    final = finish_with_best_pass(progress.state, "deadline")
-    if final is None:
-        raise PipelineDeadlineError(
-            f"Request deadline of {deadline_seconds:g}s expired before any verified pass."
-        )
-    return final
+    """Run the graph to its final state (see :func:`run_events`)."""
+    async for event in run_events(
+        engine, initial_state, run_config, deadline_seconds, progress=progress
+    ):
+        if isinstance(event, RunFinished):
+            return event.state
+    raise RuntimeError("the pipeline ended without a final state")  # unreachable
 
 
 # ---------------------------------------------------------------------------

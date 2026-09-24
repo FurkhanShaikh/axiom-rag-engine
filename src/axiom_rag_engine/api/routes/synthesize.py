@@ -284,28 +284,118 @@ async def _over_daily_budget(services: AppServices, api_key: str | None) -> JSON
     )
 
 
-async def _charge(services: AppServices, api_key: str | None) -> None:
-    """Add this request's LLM cost so far to its key's daily total."""
-    if not api_key:
-        return
-    usd = float(get_llm_usage_snapshot().get("cost_usd") or 0.0)
-    if usd <= 0:
-        return
-    key_id = _key_id(api_key)
-    KEY_SPEND_USD.labels(key_id=key_id).inc(usd)
-    if services.settings.key_daily_budget_usd:
-        await services.spend_ledger.add(key_id, utc_day(), usd)
+# ---------------------------------------------------------------------------
+# One run's bookkeeping, shared by both endpoints
+# ---------------------------------------------------------------------------
 
 
-async def _charged(
-    frames: AsyncIterator[str], services: AppServices, api_key: str | None
-) -> AsyncIterator[str]:
-    """Yield ``frames``, then charge the run — also when the client disconnects."""
+class _Run:
+    """Everything recorded about one pipeline run, whichever endpoint served it.
+
+    The JSON and streaming endpoints both end a run through this object, so
+    they record the same duration and outcome metrics, the same audit trail,
+    the same cache write and the same per-key spend. A run ends exactly once:
+    completed, failed or cancelled.
+    """
+
+    def __init__(
+        self, services: AppServices, payload: AxiomRequest, api_key: str | None, cache_key: str
+    ) -> None:
+        self._services = services
+        self._payload = payload
+        self._api_key = api_key
+        self._cache_key = cache_key
+        self._started = time.monotonic()
+        self.ended = False
+
+    def _end(self) -> None:
+        self.ended = True
+        PIPELINE_DURATION.observe(time.monotonic() - self._started)
+
+    async def completed(self, response: AxiomResponse, final_state: dict[str, Any]) -> None:
+        self._end()
+        _record_outcome_metrics(response, final_state)
+        persist_and_emit_audit(
+            self._services,
+            self._payload.request_id,
+            response.status,
+            final_state,
+            usage_snapshot=response.usage.model_dump() if response.usage else None,
+            owner=audit_owner(self._api_key),
+        )
+        await _set_cached(self._services, self._cache_key, response)
+
+    async def failed(self, failed_state: dict[str, Any]) -> None:
+        """``failed_state`` is the state reached, with its ``pipeline_failed`` event."""
+        self._end()
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        persist_and_emit_audit(
+            self._services,
+            self._payload.request_id,
+            "error",
+            failed_state,
+            usage_snapshot=get_llm_usage_snapshot(),
+            owner=audit_owner(self._api_key),
+        )
+
+    def cancelled(self) -> None:
+        self._end()
+        REQUESTS_BY_STATUS.labels(status="cancelled").inc()
+        logger.info("Client disconnected; cancelled request %s", self._payload.request_id)
+
+    async def charge(self) -> None:
+        """Add the run's LLM cost to its key's daily total (every run costs money,
+        failed and cancelled ones included)."""
+        if not self._api_key:
+            return
+        usd = float(get_llm_usage_snapshot().get("cost_usd") or 0.0)
+        if usd <= 0:
+            return
+        key_id = _key_id(self._api_key)
+        KEY_SPEND_USD.labels(key_id=key_id).inc(usd)
+        if self._services.settings.key_daily_budget_usd:
+            await self._services.spend_ledger.add(key_id, utc_day(), usd)
+
+
+async def _begin(
+    services: AppServices, payload: AxiomRequest, api_key: str | None
+) -> tuple[GraphState, str, AxiomResponse | None, JSONResponse | None]:
+    """The shared start of a request: bind its context, look up the cache, and
+    (on a miss) check the key's daily budget and open the per-request LLM budget.
+
+    Returns ``(initial_state, cache_key, cached_response, refusal)``.
+    """
+    request_id_ctx.set(payload.request_id)
+    use_settings(services.settings)
+    tag_current_span(payload.request_id)
+    initial_state = _initial_state(payload, services)
+
+    key = await _request_cache_key(services, payload, api_key, initial_state)
+    cached = await _get_cached(services, key, payload.request_id)
+    if cached is not None:
+        CACHE_HITS.inc()
+        logger.info("Cache hit for request %s", payload.request_id)
+        REQUESTS_BY_STATUS.labels(status=cached.status).inc()
+        return initial_state, key, cached, None
+    CACHE_MISSES.inc()
+    refused = await _over_daily_budget(services, api_key)
+    if refused is None:
+        # The mutable budget dict in the ContextVar is shared by every task the
+        # run spawns from this context.
+        reset_llm_budget()
+    return initial_state, key, None, refused
+
+
+async def _tracked(frames: AsyncIterator[str], run: _Run) -> AsyncIterator[str]:
+    """Yield a stream's frames; a stream closed before its run ended is a
+    cancelled run (client disconnect). Either way the run is charged."""
     try:
         async for frame in frames:
             yield frame
     finally:
-        await _charge(services, api_key)
+        if not run.ended:
+            run.cancelled()
+        await run.charge()
 
 
 # ---------------------------------------------------------------------------
@@ -373,79 +463,56 @@ async def synthesize(
     disconnects first, the pipeline is cancelled and no further LLM budget is
     spent.
     """
-    request_id_ctx.set(payload.request_id)
-    use_settings(services.settings)
-    tag_current_span(payload.request_id)
-    initial_state = _initial_state(payload, services)
-
-    key = await _request_cache_key(services, payload, _api_key, initial_state)
-    cached = await _get_cached(services, key, payload.request_id)
+    initial_state, key, cached, refused = await _begin(services, payload, _api_key)
     if cached is not None:
-        CACHE_HITS.inc()
-        logger.info("Cache hit for request %s", payload.request_id)
-        REQUESTS_BY_STATUS.labels(status=cached.status).inc()
         return JSONResponse(content=cached.model_dump())
-    CACHE_MISSES.inc()
-    refused = await _over_daily_budget(services, _api_key)
     if refused is not None:
         return refused
 
-    # Initialize the per-request LLM call budget. The mutable dict stored in the
-    # ContextVar is shared by all asyncio tasks spawned from this coroutine.
-    reset_llm_budget()
+    run = _Run(services, payload, _api_key, key)
     progress = PipelineProgress(initial_state)
 
-    def _failed(
+    async def _failed(
         status_code: int, exc: Exception, public_message: str | None = None
     ) -> JSONResponse:
         """Error response for a failed run, keeping the trail of how far it got."""
-        REQUESTS_BY_STATUS.labels(status="error").inc()
-        usage = get_llm_usage_snapshot()
-        persist_and_emit_audit(
-            services,
-            payload.request_id,
-            "error",
-            with_failure_event(dict(progress.state), progress.node, exc),
-            usage_snapshot=usage,
-            owner=audit_owner(_api_key),
+        await run.failed(with_failure_event(dict(progress.state), progress.node, exc))
+        error_resp = make_error_response(
+            payload.request_id, exc, get_llm_usage_snapshot(), public_message
         )
-        error_resp = make_error_response(payload.request_id, exc, usage, public_message)
         return JSONResponse(status_code=status_code, content=error_resp.model_dump())
 
     try:
-        with PIPELINE_DURATION.time():
-            graph_result = await run_unless_disconnected(
-                request,
-                run_pipeline(
-                    services.engine,
-                    initial_state,
-                    services.run_config(),
-                    services.settings.request_deadline_seconds,
-                    progress=progress,
-                ),
-            )
+        graph_result = await run_unless_disconnected(
+            request,
+            run_pipeline(
+                services.engine,
+                initial_state,
+                services.run_config(),
+                services.settings.request_deadline_seconds,
+                progress=progress,
+            ),
+        )
     except ClientDisconnectedError:
-        REQUESTS_BY_STATUS.labels(status="cancelled").inc()
-        logger.info("Client disconnected; cancelled request %s", payload.request_id)
+        run.cancelled()
         # 499 (client closed request): nobody reads it, but logs show why.
         return Response(status_code=499)
     except LLMBudgetExceededError as exc:
         # 422, not 429: the same request would exhaust the same budget again,
         # and clients and proxies retry 429s. (After a verified pass the run
         # already returns that pass with 200.)
-        return _failed(
+        return await _failed(
             422,
             exc,
             "The request exhausted its LLM budget before any answer was verified "
             "(AXIOM_MAX_LLM_CALLS_PER_REQUEST / AXIOM_MAX_TOKENS_PER_REQUEST).",
         )
     except PipelineDeadlineError as exc:
-        return _failed(504, exc)
+        return await _failed(504, exc)
     except Exception as exc:
-        return _failed(500, exc)
+        return await _failed(500, exc)
     finally:
-        # Every run is charged: failed, cancelled and timed-out runs cost money too.
-        await _charge(services, _api_key)
+        await run.charge()
 
     response = marshal_response(
         payload.request_id,
@@ -453,16 +520,7 @@ async def synthesize(
         payload.include_debug,
         get_llm_usage_snapshot(),
     )
-    _record_outcome_metrics(response, graph_result)
-    persist_and_emit_audit(
-        services,
-        payload.request_id,
-        response.status,
-        graph_result,
-        usage_snapshot=response.usage.model_dump() if response.usage else None,
-        owner=audit_owner(_api_key),
-    )
-    await _set_cached(services, key, response)
+    await run.completed(response, graph_result)
     return JSONResponse(content=response.model_dump())
 
 
@@ -474,76 +532,37 @@ async def synthesize_stream(
 ) -> Response:
     """Stream pipeline progress as Server-Sent Events.
 
-    Same request body as ``POST /v1/synthesize``. Emits one SSE frame per
-    pipeline stage plus a ``complete`` frame carrying the full AxiomResponse.
-    Sentences appear in ``sentence`` frames only after the final verification
-    pass, each with its verification result — including sentences that failed
-    or could not be verified, which are labelled (as in the JSON response), not
-    hidden. Draft text from intermediate passes never reaches the client.
+    Same request body as ``POST /v1/synthesize``, run through the same runner
+    (``graph.run_events``) and ended through the same bookkeeping, so metrics,
+    audit trails, cache writes and spend match the JSON endpoint. Emits one SSE
+    frame per pipeline stage plus a ``complete`` frame carrying the full
+    AxiomResponse. Sentences appear in ``sentence`` frames only after the final
+    verification pass, each with its verification result — including sentences
+    that failed or could not be verified, which are labelled (as in the JSON
+    response), not hidden. Draft text from intermediate passes never reaches
+    the client.
 
     Disconnect behavior: if the client drops mid-stream the pipeline is
     cancelled — in-flight LLM calls are unwound and no further budget is
-    consumed. Audit trails, metrics, and cache writes happen only for runs
-    that stream to completion.
+    consumed — and the run is counted as cancelled.
     """
-    request_id_ctx.set(payload.request_id)
-    use_settings(services.settings)
-    tag_current_span(payload.request_id)
-    initial_state = _initial_state(payload, services)
+    initial_state, key, cached, refused = await _begin(services, payload, _api_key)
+    if refused is not None:
+        return refused
 
-    key = await _request_cache_key(services, payload, _api_key, initial_state)
-    cached = await _get_cached(services, key, payload.request_id)
-    if cached is not None:
-        CACHE_HITS.inc()
-        REQUESTS_BY_STATUS.labels(status=cached.status).inc()
-    else:
-        CACHE_MISSES.inc()
-        refused = await _over_daily_budget(services, _api_key)
-        if refused is not None:
-            return refused
-        reset_llm_budget()
-
-    started = time.monotonic()
-
-    async def _on_complete(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
-        """Post-pipeline housekeeping: metrics, audit, cache."""
-        PIPELINE_DURATION.observe(time.monotonic() - started)
-        _record_outcome_metrics(response, graph_result)
-        persist_and_emit_audit(
-            services,
-            payload.request_id,
-            response.status,
-            graph_result,
-            usage_snapshot=response.usage.model_dump() if response.usage else None,
-            owner=audit_owner(_api_key),
-        )
-        await _set_cached(services, key, response)
-
-    async def _on_error(failed_state: dict[str, Any]) -> None:
-        """Failed run: count it and keep the trail of how far it got."""
-        PIPELINE_DURATION.observe(time.monotonic() - started)
-        REQUESTS_BY_STATUS.labels(status="error").inc()
-        persist_and_emit_audit(
-            services,
-            payload.request_id,
-            "error",
-            failed_state,
-            usage_snapshot=get_llm_usage_snapshot(),
-            owner=audit_owner(_api_key),
-        )
-
+    run = _Run(services, payload, _api_key, key)
     frames = stream_pipeline(
         payload=payload,
         engine=services.engine,
         initial_state=initial_state,
         cached_response=cached,
-        on_complete=_on_complete,
+        on_complete=run.completed,
         run_config=services.run_config(),
         deadline_seconds=services.settings.request_deadline_seconds,
-        on_error=_on_error,
+        on_error=run.failed,
     )
     return StreamingResponse(
-        frames if cached is not None else _charged(frames, services, _api_key),
+        frames if cached is not None else _tracked(frames, run),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -18,17 +18,20 @@ Event ordering guarantee:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import logging
-import time
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from axiom_rag_engine.graph import (
+    Keepalive,
+    NodeFinished,
+    NodeStarted,
     PipelineDeadlineError,
-    finish_with_best_pass,
+    PipelineProgress,
+    RunFinished,
+    run_events,
     with_failure_event,
 )
 from axiom_rag_engine.marshalling import marshal_response
@@ -39,11 +42,6 @@ logger = logging.getLogger("axiom_rag_engine.api.sse")
 if TYPE_CHECKING:
     from axiom_rag_engine.models import AxiomRequest, AxiomResponse
     from axiom_rag_engine.state import GraphState
-
-# Node names registered in graph.py — used to filter LangGraph event stream.
-_NODE_NAMES = frozenset(
-    {"retriever", "re_retriever", "scorer", "ranker", "synthesizer", "verifier"}
-)
 
 # Seconds between keepalive comment frames; prevents proxy idle-connection drops
 # during the synthesizer's long LLM call.
@@ -87,33 +85,20 @@ def _stage_metadata(node: str, phase: str, payload: dict[str, Any]) -> dict[str,
 
 
 # ---------------------------------------------------------------------------
-# State accumulator
+# Loop detection
 # ---------------------------------------------------------------------------
 
 
-def _apply_node_update(state: dict[str, Any], update: dict[str, Any]) -> None:
-    """Merge a node's state-update dict into the accumulated state.
-
-    ``audit_trail`` uses an ``operator.add`` reducer in LangGraph — new events
-    are appended, never replaced.  All other fields are replaced wholesale.
-    """
-    for key, value in update.items():
-        if key == "audit_trail":
-            existing = list(state.get("audit_trail") or [])
-            state["audit_trail"] = existing + list(value or [])
-        else:
-            state[key] = value
-
-
-def _loop_reason(node: str, accumulated: dict[str, Any]) -> str | None:
+def _loop_reason(node: str, state: dict[str, Any]) -> str | None:
     """Classify a node start as the beginning of a loop iteration, if it is one.
 
-    A ``synthesizer`` start is a rewrite when the previous verification pass
-    left correction requests; a ``re_retriever`` start is always a re-retrieval.
+    ``state`` is the state LangGraph hands the node. A ``synthesizer`` start is
+    a rewrite when the previous verification pass left correction requests; a
+    ``re_retriever`` start is always a re-retrieval.
     """
     if node == "re_retriever":
         return "re_retrieve"
-    if node == "synthesizer" and accumulated.get("rewrite_requests"):
+    if node == "synthesizer" and state.get("rewrite_requests"):
         return "rewrite"
     return None
 
@@ -135,15 +120,17 @@ async def stream_pipeline(
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE frames for one pipeline execution.
 
-    ``on_complete`` is awaited with ``(AxiomResponse, accumulated_state)``
-    immediately before the ``complete`` frame — use it for cache writes,
-    Prometheus updates, and audit persistence. ``run_config`` is forwarded to
-    LangGraph (it carries the app's search backend). ``deadline_seconds`` (0 =
-    none) bounds the run: on expiry the best verified pass is returned, or an
-    ``error`` frame (``deadline_exceeded``) if no pass was verified yet.
-    ``on_error`` is awaited with the state reached so far (plus a
-    ``pipeline_failed`` audit event) before any ``error`` frame, so a failed
-    run's audit trail is kept.
+    The run itself is ``graph.run_events`` — the same runner the JSON endpoint
+    uses — so both see the same final state, deadline and failure trail.
+
+    ``on_complete`` is awaited with ``(AxiomResponse, final_state)`` immediately
+    before the ``complete`` frame — use it for cache writes, Prometheus updates,
+    and audit persistence. ``run_config`` is forwarded to LangGraph (it carries
+    the app's search backend). ``deadline_seconds`` (0 = none) bounds the run:
+    on expiry the best verified pass is returned, or an ``error`` frame
+    (``deadline_exceeded``) if no pass was verified yet. ``on_error`` is awaited
+    with the state reached so far (plus a ``pipeline_failed`` audit event)
+    before any ``error`` frame, so a failed run's audit trail is kept.
     """
     event_id = 0
 
@@ -171,83 +158,37 @@ async def stream_pipeline(
         return
 
     # -- live pipeline --
-    node_start_times: dict[str, float] = {}
-
-    # Accumulate state updates so we can build the final result without a
-    # second ainvoke call.
-    accumulated: dict[str, Any] = dict(initial_state)
-    accumulated["audit_trail"] = list(initial_state.get("audit_trail") or [])
-
-    async def _next(iterator: Any) -> Any:
-        return await iterator.__anext__()
-
-    pending_event: asyncio.Task[Any] | None = None
-    timeout_task: asyncio.Task[Any] | None = None
-    deadline_at = time.monotonic() + deadline_seconds if deadline_seconds > 0 else None
-    deadline_hit = False
-    current_node: str | None = None
+    progress = PipelineProgress(initial_state)
+    final_state: dict[str, Any] = dict(initial_state)
 
     async def _report_failure(exc: BaseException) -> None:
         if on_error is None:
             return
         try:
-            await on_error(with_failure_event(accumulated, current_node, exc))
+            await on_error(with_failure_event(dict(progress.state), progress.node, exc))
         except Exception:
             logger.exception("on_error hook failed for request %s", payload.request_id)
 
     try:
-        stream_kwargs: dict[str, Any] = {"version": "v2"}
-        if run_config is not None:
-            stream_kwargs["config"] = run_config
-        it = engine.astream_events(initial_state, **stream_kwargs).__aiter__()
-        while True:
-            if pending_event is None:
-                pending_event = asyncio.ensure_future(_next(it))
-            # Race the next pipeline event against a keepalive timer (capped at
-            # the time left before the deadline) so we don't cancel __anext__()
-            # when we want to emit a keepalive.
-            wait_for = _KEEPALIVE_INTERVAL
-            if deadline_at is not None:
-                wait_for = max(0.0, min(wait_for, deadline_at - time.monotonic()))
-            timeout_task = asyncio.ensure_future(asyncio.sleep(wait_for))
-            done, _pending_set = await asyncio.wait(
-                {pending_event, timeout_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if pending_event not in done:
-                timeout_task.cancel()
-                timeout_task = None
-                if deadline_at is not None and time.monotonic() >= deadline_at:
-                    deadline_hit = True  # the finally below cancels the run
-                    break
+        async for event in run_events(
+            engine,
+            initial_state,
+            run_config,
+            deadline_seconds,
+            progress=progress,
+            keepalive_seconds=_KEEPALIVE_INTERVAL,
+        ):
+            if isinstance(event, Keepalive):
                 yield ": keepalive\n\n"
-                continue
-            timeout_task.cancel()
-            timeout_task = None
-            try:
-                event = pending_event.result()
-            except StopAsyncIteration:
-                pending_event = None
-                break
-            pending_event = None
-
-            evt_type: str = event.get("event", "")
-            name: str = event.get("name", "")
-            data: dict[str, Any] = event.get("data") or {}
-
-            if name not in _NODE_NAMES:
-                continue
-
-            if evt_type == "on_chain_start":
-                current_node = name
-                node_start_times[name] = time.monotonic()
-                loop_reason = _loop_reason(name, accumulated)
+            elif isinstance(event, NodeStarted):
+                loop_reason = _loop_reason(event.node, event.state)
                 if loop_reason is not None:
-                    retry = int(accumulated.get("retrieval_retry_count") or 0)
+                    retry = int(event.state.get("retrieval_retry_count") or 0)
                     yield _sse(
                         "loop",
                         {
                             "type": "loop",
-                            "loop_count": int(accumulated.get("loop_count") or 0),
+                            "loop_count": int(event.state.get("loop_count") or 0),
                             "retrieval_retry_count": retry + 1
                             if loop_reason == "re_retrieve"
                             else retry,
@@ -259,48 +200,27 @@ async def stream_pipeline(
                     "stage",
                     {
                         "type": "stage",
-                        "stage": name,
+                        "stage": event.node,
                         "phase": "start",
                         "elapsed_ms": 0,
                         "metadata": {},
                     },
                     _next_id(),
                 )
-
-            elif evt_type == "on_chain_end":
-                elapsed_ms = round(
-                    (time.monotonic() - node_start_times.get(name, time.monotonic())) * 1000
-                )
-                output: dict[str, Any] = data.get("output") or {}
-                if isinstance(output, dict):
-                    _apply_node_update(accumulated, output)
-                if name == "verifier":
-                    logger.debug(
-                        "[%s] verifier on_chain_end: output type=%s keys=%s final_sentences=%d draft_sentences_in_accum=%d",
-                        payload.request_id,
-                        type(data.get("output")).__name__,
-                        list(output.keys()) if isinstance(output, dict) else "N/A",
-                        len(output.get("final_sentences") or [])
-                        if isinstance(output, dict)
-                        else -1,
-                        len(accumulated.get("draft_sentences") or []),
-                    )
-
-                metadata = _stage_metadata(
-                    name, "complete", output if isinstance(output, dict) else {}
-                )
+            elif isinstance(event, NodeFinished):
                 yield _sse(
                     "stage",
                     {
                         "type": "stage",
-                        "stage": name,
+                        "stage": event.node,
                         "phase": "complete",
-                        "elapsed_ms": elapsed_ms,
-                        "metadata": metadata,
+                        "elapsed_ms": event.elapsed_ms,
+                        "metadata": _stage_metadata(event.node, "complete", event.update),
                     },
                     _next_id(),
                 )
-
+            elif isinstance(event, RunFinished):
+                final_state = event.state
     except LLMBudgetExceededError as exc:
         await _report_failure(exc)
         yield _sse(
@@ -311,6 +231,19 @@ async def stream_pipeline(
                 "message": str(exc),
                 "request_id": payload.request_id,
                 "usage": get_llm_usage_snapshot(),
+            },
+            _next_id(),
+        )
+        return
+    except PipelineDeadlineError as exc:
+        await _report_failure(exc)
+        yield _sse(
+            "error",
+            {
+                "type": "error",
+                "error_type": "deadline_exceeded",
+                "message": "Request deadline expired before any verified pass.",
+                "request_id": payload.request_id,
             },
             _next_id(),
         )
@@ -334,57 +267,13 @@ async def stream_pipeline(
             _next_id(),
         )
         return
-    finally:
-        # A client disconnect closes this generator at whichever yield it is
-        # suspended on (GeneratorExit), which the except clauses above do not
-        # catch. Cancel the in-flight __anext__ task so the underlying
-        # LangGraph run is unwound instead of leaking as a destroyed-pending
-        # task that keeps burning LLM budget with no reader.
-        if timeout_task is not None:
-            timeout_task.cancel()
-        if pending_event is not None and not pending_event.done():
-            pending_event.cancel()
-            with contextlib.suppress(BaseException):
-                await pending_event
-
-    if deadline_hit:
-        final_state = finish_with_best_pass(cast("GraphState", accumulated), "deadline")
-        if final_state is None:
-            await _report_failure(
-                PipelineDeadlineError("Request deadline expired before any verified pass.")
-            )
-            yield _sse(
-                "error",
-                {
-                    "type": "error",
-                    "error_type": "deadline_exceeded",
-                    "message": "Request deadline expired before any verified pass.",
-                    "request_id": payload.request_id,
-                },
-                _next_id(),
-            )
-            return
-        accumulated = final_state
 
     # -- marshal final response --
-    final_sentences = accumulated.get("final_sentences") or []
-    logger.debug(
-        "Stream complete for %s — final_sentences=%d is_answerable=%s",
-        payload.request_id,
-        len(final_sentences),
-        accumulated.get("is_answerable"),
-    )
-    if final_sentences:
-        first = final_sentences[0].get("verification", {})
-        logger.debug(
-            "First sentence tier=%s mech=%s", first.get("tier"), first.get("mechanical_check")
-        )
-    usage_snapshot = get_llm_usage_snapshot()
     response = marshal_response(
         payload.request_id,
-        accumulated,
+        final_state,
         payload.include_debug,
-        usage_snapshot,
+        get_llm_usage_snapshot(),
     )
 
     # -- sentence events (verified sentences only) --
@@ -398,7 +287,7 @@ async def stream_pipeline(
     # -- post-complete hook (cache, metrics, audit) before terminal frame --
     if on_complete is not None:
         try:
-            await on_complete(response, accumulated)
+            await on_complete(response, final_state)
         except Exception:
             # Housekeeping (cache, metrics, audit) must not break the stream,
             # but its failures must be visible.

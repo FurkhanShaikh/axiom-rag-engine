@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — per-key spending cap (API-7)
 - **`AXIOM_KEY_DAILY_BUDGET_USD` caps each API key's daily LLM spend.** Cost is summed per key per UTC day — failed, cancelled and timed-out runs included, stream or JSON — and a key at its cap is refused with 429 and `Retry-After` (until 00:00 UTC) before any model is called. Cache hits are free and still served. Totals are shared through Redis when the cache uses it (per process otherwise, or while Redis is unreachable). New metrics: `axiom_key_spend_usd_total{key_id}` and `axiom_key_budget_rejections_total{key_id}` (`key_id` is a short hash of the key). Costs come from LiteLLM, so models it cannot price count as $0. Document ingestion (admin keys only) is not capped.
 
+### Changed — one run path for both endpoints (API-5)
+- **`/v1/synthesize` and `/v1/synthesize/stream` run requests the same way.** Both go through `graph.run_events` (LangGraph's event stream, with the deadline, keepalives and disconnect cancellation in one place) and end through one bookkeeping object, so duration and outcome metrics, audit trails, cache writes and per-key spend are identical. The stream now takes its final state from LangGraph instead of re-deriving it with a hand-written reducer (which replaced `past_seen_urls` instead of appending), and a stream closed by the client now counts as `cancelled`, like the JSON endpoint's 499.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

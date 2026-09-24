@@ -340,12 +340,31 @@ class TestEndpoint:
 # ===========================================================================
 
 
+class _FakeGraph:
+    """A compiled-graph double: LangGraph's event stream for one run, ending
+    with the root's final state (or raising ``error``)."""
+
+    def __init__(self, result: dict | None = None, error: Exception | None = None) -> None:
+        self.result = result or {}
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def astream_events(self, state: dict, **_kwargs: object):  # type: ignore[no-untyped-def]
+        self.calls.append(state)
+        if self.error is not None:
+            raise self.error
+        yield {"event": "on_chain_end", "name": "LangGraph", "data": {"output": self.result}}
+
+
 class TestErrorHandling:
     def test_graph_exception_returns_error_status(self, client: TestClient) -> None:
         """If the graph itself raises, the endpoint returns HTTP 500 with a
         structured AxiomResponse body (H4 fix: was incorrectly 200 before)."""
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(side_effect=RuntimeError("LangGraph internal failure"))
+        with patch.object(
+            app.state.services,
+            "engine",
+            _FakeGraph(error=RuntimeError("LangGraph internal failure")),
+        ):
             resp = client.post("/v1/synthesize", json=_VALID_REQUEST)
 
         # H4: pipeline errors now return 500, not 200.
@@ -360,8 +379,7 @@ class TestErrorHandling:
         assert "Internal pipeline error" in data["error_message"]
 
     def test_error_response_is_valid_axiom_response(self, client: TestClient) -> None:
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(side_effect=RuntimeError("crash"))
+        with patch.object(app.state.services, "engine", _FakeGraph(error=RuntimeError("crash"))):
             resp = client.post("/v1/synthesize", json=_VALID_REQUEST)
 
         # Body must still be a valid AxiomResponse regardless of HTTP status.
@@ -408,10 +426,11 @@ class TestValidationErrors:
     def test_valid_minimal_payload_accepted(self, client: TestClient) -> None:
         """Minimal payload with only required fields should be accepted."""
         minimal = {"request_id": "req_min", "user_query": "Test query"}
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(
-                return_value={"is_answerable": False, "final_sentences": []}
-            )
+        with patch.object(
+            app.state.services,
+            "engine",
+            _FakeGraph({"is_answerable": False, "final_sentences": []}),
+        ):
             resp = client.post("/v1/synthesize", json=minimal)
         assert resp.status_code == 200
         assert resp.json()["request_id"] == "req_min"
@@ -433,13 +452,14 @@ class TestValidationErrors:
                 "exclude_default_domains": ["reddit.com"],
             },
         }
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(
-                return_value={"is_answerable": False, "final_sentences": []}
-            )
+        with patch.object(
+            app.state.services,
+            "engine",
+            _FakeGraph({"is_answerable": False, "final_sentences": []}),
+        ) as mock_engine:
             resp = client.post("/v1/synthesize", json=payload)
         assert resp.status_code == 200
-        initial_state = mock_engine.ainvoke.call_args.args[0]
+        initial_state = mock_engine.calls[0]
         assert initial_state["app_config"]["banned_domains"] == ["spam.com"]
         assert initial_state["app_config"]["authoritative_domains"] == []
         assert initial_state["app_config"]["low_quality_domains"] == []
@@ -454,13 +474,14 @@ class TestValidationErrors:
             "user_query": "What is a battery?",
             "pipeline_config": {"stages": {"semantic_verification_enabled": False}},
         }
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(
-                return_value={"is_answerable": False, "final_sentences": []}
-            )
+        with patch.object(
+            app.state.services,
+            "engine",
+            _FakeGraph({"is_answerable": False, "final_sentences": []}),
+        ) as mock_engine:
             resp = client.post("/v1/synthesize", json=payload)
         assert resp.status_code == 200
-        initial_state = mock_engine.ainvoke.call_args.args[0]
+        initial_state = mock_engine.calls[0]
         assert initial_state["pipeline_config"]["stages"]["semantic_verification_enabled"] is True
 
 
@@ -482,8 +503,7 @@ class TestCacheIsolation:
             "is_answerable": True,
             "final_sentences": [make_final_sentence_dict(tier=1)],
         }
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(return_value=graph_result)
+        with patch.object(app.state.services, "engine", _FakeGraph(graph_result)) as mock_engine:
             first = client.post("/v1/synthesize", json={**_VALID_REQUEST, "request_id": "req_a"})
             second = client.post("/v1/synthesize", json={**_VALID_REQUEST, "request_id": "req_b"})
 
@@ -491,7 +511,7 @@ class TestCacheIsolation:
         assert second.status_code == 200
         assert first.json()["request_id"] == "req_a"
         assert second.json()["request_id"] == "req_b"
-        assert mock_engine.ainvoke.call_count == 1
+        assert len(mock_engine.calls) == 1
 
     def test_include_debug_isolated_from_non_debug_cache_entries(self, client: TestClient) -> None:
         graph_result = {
@@ -501,8 +521,7 @@ class TestCacheIsolation:
             "indexed_chunks": _SAMPLE_CHUNKS,
             "ranked_chunks": _SAMPLE_CHUNKS,
         }
-        with patch.object(app.state.services, "engine") as mock_engine:
-            mock_engine.ainvoke = AsyncMock(return_value=graph_result)
+        with patch.object(app.state.services, "engine", _FakeGraph(graph_result)) as mock_engine:
             no_debug = client.post(
                 "/v1/synthesize", json={**_VALID_REQUEST, "include_debug": False}
             )
@@ -514,7 +533,7 @@ class TestCacheIsolation:
         assert with_debug.status_code == 200
         assert no_debug.json()["debug"] is None
         assert with_debug.json()["debug"] is not None
-        assert mock_engine.ainvoke.call_count == 2
+        assert len(mock_engine.calls) == 2
 
 
 class TestAuthMode:
