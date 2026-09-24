@@ -352,8 +352,11 @@ python tasks.py evals gate
 python tasks.py evals semantic -- --model gpt-4o-mini --limit 200
 
 # Free model via OpenRouter (shared endpoints throttle — run serially).
-# The eval retries transient 429s with the provider's Retry-After.
-AXIOM_MAX_CONCURRENT_LLM=1 python tasks.py evals semantic -- \
+# Rate limits are retried by the production call path (AXIOM_LLM_MAX_RETRIES,
+# honouring Retry-After); raising the retry settings here makes the run finish
+# but its error rate then describes that policy, which the results record.
+AXIOM_MAX_CONCURRENT_LLM=1 AXIOM_LLM_MAX_RETRIES=5 AXIOM_LLM_RETRY_MAX_WAIT_SECONDS=40 \
+  python tasks.py evals semantic -- \
   --model "openrouter/google/gemma-4-26b-a4b-it:free" --limit 30
 
 # Keyed end-to-end golden set
