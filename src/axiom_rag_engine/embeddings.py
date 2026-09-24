@@ -1,6 +1,8 @@
 """Embedding backend for dense/hybrid retrieval.
 
-All embedding calls go through LiteLLM, mirroring the LLM integration: the model
+All embedding calls go through LiteLLM via ``utils.llm.call_embedding``, so they
+share the chat calls' budget, concurrency limit, retries, and usage/cost
+accounting. The model
 is a config string (``ollama/nomic-embed-text`` for local, ``text-embedding-3-small``
 for OpenAI, ...), and Ollama models get their ``api_base`` injected the same way
 ``utils.llm.build_completion_kwargs`` does.
@@ -16,9 +18,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
-import litellm
-
 from axiom_rag_engine.config.settings import current_settings
+from axiom_rag_engine.utils.llm import call_embedding, call_embedding_sync
+
+# Budget/usage label for embedding calls (``node`` in metrics and usage).
+_NODE = "embedding"
 
 
 def embed_prefixes(model: str) -> tuple[str, str]:
@@ -68,7 +72,7 @@ async def embed_query_and_chunks(
     """
     doc_prefix, query_prefix = embed_prefixes(model)
     inputs = [query_prefix + query] + [doc_prefix + t for t in chunk_texts]
-    response = await litellm.aembedding(**_embedding_kwargs(model, inputs))
+    response = await call_embedding(_NODE, model, _embedding_kwargs(model, inputs))
     # LiteLLM normalizes the response to OpenAI shape: data[i]["embedding"].
     vectors = [_l2_normalize(list(row["embedding"])) for row in response["data"]]
     return vectors[0], vectors[1:]
@@ -86,7 +90,7 @@ async def embed_documents(model: str, texts: list[str]) -> list[list[float]]:
         return []
     doc_prefix, _ = embed_prefixes(model)
     inputs = [doc_prefix + t for t in texts]
-    response = await litellm.aembedding(**_embedding_kwargs(model, inputs))
+    response = await call_embedding(_NODE, model, _embedding_kwargs(model, inputs))
     return [_l2_normalize(list(row["embedding"])) for row in response["data"]]
 
 
@@ -98,7 +102,7 @@ async def embed_query(model: str, query: str) -> list[float]:
     both were produced by the same model*, which the corpus store enforces.
     """
     _, query_prefix = embed_prefixes(model)
-    response = await litellm.aembedding(**_embedding_kwargs(model, [query_prefix + query]))
+    response = await call_embedding(_NODE, model, _embedding_kwargs(model, [query_prefix + query]))
     return _l2_normalize(list(response["data"][0]["embedding"]))
 
 
@@ -112,5 +116,5 @@ def embed_query_sync(model: str, query: str) -> list[float]:
     affinity.
     """
     _, query_prefix = embed_prefixes(model)
-    response = litellm.embedding(**_embedding_kwargs(model, [query_prefix + query]))
+    response = call_embedding_sync(_NODE, model, _embedding_kwargs(model, [query_prefix + query]))
     return _l2_normalize(list(response["data"][0]["embedding"]))
