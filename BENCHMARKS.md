@@ -466,6 +466,12 @@ ceiling) once you want the full keyed run gated nightly.
   (Arabic, accented Latin, …) and splits CJK/Thai runs into character bigrams —
   the standard dictionary-free approach, but weaker than a real segmenter. It
   did not change the SciFact numbers above (English).
+- **Sentence segmentation uses English rules.** Chunking splits long
+  paragraphs with pySBD's English segmenter. It breaks on CJK full stops (。)
+  but not on some other scripts' punctuation (e.g. the Arabic question mark
+  ؟), and abbreviations and numbers follow English conventions, so other
+  languages can get a few misplaced chunk boundaries. Retrieval quality
+  has only been measured on English datasets.
 - **Tier calibration is only as good as its judge.** The ASQA calibration
   above used a local 4B judge that rated nearly everything supported; it cannot
   separate the tiers. A stronger judge is the next measurement, and the tier

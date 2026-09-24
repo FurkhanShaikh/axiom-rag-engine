@@ -107,6 +107,11 @@ _OVERLAP_SENTENCES = 1  # Sentences carried forward to bridge chunk boundaries
 _MAX_CHUNKS_PER_REQUEST = 200
 
 # Module-level segmenter; pySBD is stateless so this is safe for concurrent use.
+# English rules: it splits on CJK full stops (。) but not on some other
+# scripts' punctuation (e.g. the Arabic question mark ؟), and abbreviation and
+# number handling follow English, so non-English text may split at a few wrong
+# points. That only moves chunk boundaries (quotes are verified against the
+# chunk, and windows overlap by a sentence); see BENCHMARKS.md caveats.
 _SEGMENTER = pysbd.Segmenter(language="en", clean=False)
 
 

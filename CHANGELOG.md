@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Search backends are queried concurrently.** With `retrieval_source=both`, web search and the corpus ran one after the other, so their latencies added up; they now run in parallel (merge order unchanged: web first), each in a copy of the request's context so it sees the serving app's settings.
 - **Tavily calls carry an explicit timeout**, `AXIOM_SEARCH_TIMEOUT_SECONDS` (default 20 s). The client default was 60 s, retried three times.
 
+### Changed — scoring weights (RET-2; breaking for callers sending an inconsistent pair)
+- **`app_config.source_weight` and `chunk_weight` must sum to 1.0.** Nothing checked it, so `{"source_weight": 0.5}` scored with 0.5 + the default 0.6. A single weight now implies its pair (`0.5` → `0.5/0.5`); a pair that does not sum to 1.0 is rejected with 422.
+- Chunking's English-only sentence rules are documented (BENCHMARKS.md → Honest caveats).
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 
