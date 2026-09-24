@@ -32,8 +32,12 @@ def settings_from_request(request: Request | None) -> Settings:
 
 
 def _api_keys(settings: Settings | None = None) -> set[str]:
-    """Valid API keys from ``settings`` (process settings by default)."""
-    return {k for k in (settings or get_settings()).api_keys if k}
+    """Valid API keys from ``settings`` (process settings by default).
+
+    Admin keys are valid API keys too, so an operator can use one key for both.
+    """
+    resolved = settings or get_settings()
+    return {k for k in (*resolved.api_keys, *resolved.admin_api_keys) if k}
 
 
 def _auth_required(settings: Settings | None = None) -> bool:
@@ -111,3 +115,28 @@ async def verify_api_key(
 ) -> str | None:
     """FastAPI dependency: validate the API key against the app's settings."""
     return check_api_key(api_key, settings_from_request(request))
+
+
+async def verify_admin_key(
+    request: Request,
+    api_key: str | None = Security(_api_key_header),
+) -> str | None:
+    """FastAPI dependency for operations that change shared state (the corpus).
+
+    Every tenant's answers are built from the one shared corpus, so letting any
+    key ingest or delete documents let one tenant poison or erase what the
+    others retrieve. When auth is required the key must be listed in
+    AXIOM_ADMIN_API_KEYS (403 otherwise; refused outright if none are set).
+    With auth disabled there are no tenants, so writes stay open.
+    """
+    settings = settings_from_request(request)
+    key = check_api_key(api_key, settings)
+    if not _auth_required(settings):
+        return key
+    admin_keys = {k for k in settings.admin_api_keys if k}
+    if not admin_keys or not api_key or not _hashed_key_check(api_key, admin_keys):
+        raise HTTPException(
+            status_code=403,
+            detail="This operation requires an admin API key (AXIOM_ADMIN_API_KEYS).",
+        )
+    return key
