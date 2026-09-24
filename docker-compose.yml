@@ -61,7 +61,7 @@ services:
 
   # ── Redis (response cache backing store) ──────────────────────────────────
   redis:
-    image: redis:7.4-alpine
+    image: redis:8.0-alpine
     container_name: axiom-redis
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
