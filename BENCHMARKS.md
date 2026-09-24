@@ -82,8 +82,20 @@ with the same eval (`--method hybrid`). The measurement did its job: it stopped
 a feature that doesn't help from shipping.
 
 Only the **BM25** row is an enforced per-PR gate (deterministic, no keys); a
-ranker change that drops any metric fails CI. Dense/hybrid are research runs
-(they need a local embedder) and are not gated.
+ranker change that drops any metric fails CI. Its floors are pinned to the
+observed values above with a 0.001 float-rounding tolerance (they used to sit
+~2 points lower, which let recall@10 lose four claims unnoticed). When a change
+improves them, the gate says so; raise the floors with
+`python evals/retrieval_eval.py --limit 0 --gate --ratchet`, which never lowers
+a bound. Dense/hybrid are research runs (they need a local embedder) and are
+not gated.
+
+To compare two methods, save both runs' results and run
+`python evals/retrieval_eval.py --compare BASELINE_RESULTS CANDIDATE_RESULTS`:
+it resamples the shared queries as pairs and prints the mean difference with a
+95% paired-bootstrap interval for recall@10, nDCG@10 and reciprocal rank,
+marking whether the interval excludes zero. Point differences on small samples
+(such as the 15-query tables below) should be read with that check in mind.
 
 #### When does hybrid win? A controlled vocabulary-mismatch A/B
 
