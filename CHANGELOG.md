@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — CI plumbing
+- One composite setup action (`.github/actions/setup`) replaces five copies of the uv/Python/install steps and turns on uv's download cache keyed on `uv.lock`. CI runs with a read-only token, and a new push to a PR cancels its superseded runs (runs for `main` and tags are never cancelled).
+
 ### Fixed — CI tested stale dependency locks
 - **Dependency bumps are now tested at their new versions.** Dependabot ran in `pip` mode, which edits `pyproject.toml` but not `uv.lock`, and CI installed with `uv sync --frozen`, which does not check the lock against `pyproject.toml`, so bump PRs passed while testing the old locked versions (the fastapi, pydantic, httpx and pytest bumps never touched `uv.lock`). Dependabot now uses its `uv` ecosystem, which updates the lock, and CI installs with `uv sync --locked`, which fails on a stale lock.
 
