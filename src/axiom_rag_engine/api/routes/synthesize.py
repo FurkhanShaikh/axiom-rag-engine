@@ -28,7 +28,12 @@ from axiom_rag_engine.config.observability import (
     tag_current_span,
 )
 from axiom_rag_engine.config.settings import Settings, use_settings
-from axiom_rag_engine.graph import PipelineDeadlineError, run_pipeline
+from axiom_rag_engine.graph import (
+    PipelineDeadlineError,
+    PipelineProgress,
+    run_pipeline,
+    with_failure_event,
+)
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
 from axiom_rag_engine.models import AxiomRequest, AxiomResponse
 from axiom_rag_engine.services import AppServices
@@ -311,6 +316,22 @@ async def synthesize(
     # Initialize the per-request LLM call budget. The mutable dict stored in the
     # ContextVar is shared by all asyncio tasks spawned from this coroutine.
     reset_llm_budget()
+    progress = PipelineProgress(initial_state)
+
+    def _failed(status_code: int, exc: Exception) -> JSONResponse:
+        """Error response for a failed run, keeping the trail of how far it got."""
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        usage = get_llm_usage_snapshot()
+        persist_and_emit_audit(
+            services,
+            payload.request_id,
+            "error",
+            with_failure_event(dict(progress.state), progress.node, exc),
+            usage_snapshot=usage,
+            owner=audit_owner(_api_key),
+        )
+        error_resp = make_error_response(payload.request_id, exc, usage)
+        return JSONResponse(status_code=status_code, content=error_resp.model_dump())
 
     try:
         with PIPELINE_DURATION.time():
@@ -321,6 +342,7 @@ async def synthesize(
                     initial_state,
                     services.run_config(),
                     services.settings.request_deadline_seconds,
+                    progress=progress,
                 ),
             )
     except ClientDisconnectedError:
@@ -329,17 +351,11 @@ async def synthesize(
         # 499 (client closed request): nobody reads it, but logs show why.
         return Response(status_code=499)
     except LLMBudgetExceededError as exc:
-        REQUESTS_BY_STATUS.labels(status="error").inc()
-        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
-        return JSONResponse(status_code=429, content=error_resp.model_dump())
+        return _failed(429, exc)
     except PipelineDeadlineError as exc:
-        REQUESTS_BY_STATUS.labels(status="error").inc()
-        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
-        return JSONResponse(status_code=504, content=error_resp.model_dump())
+        return _failed(504, exc)
     except Exception as exc:
-        REQUESTS_BY_STATUS.labels(status="error").inc()
-        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
-        return JSONResponse(status_code=500, content=error_resp.model_dump())
+        return _failed(500, exc)
 
     response = marshal_response(
         payload.request_id,
@@ -407,6 +423,18 @@ async def synthesize_stream(
         )
         await _set_cached(services, key, response)
 
+    async def _on_error(failed_state: dict[str, Any]) -> None:
+        """Failed run: count it and keep the trail of how far it got."""
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        persist_and_emit_audit(
+            services,
+            payload.request_id,
+            "error",
+            failed_state,
+            usage_snapshot=get_llm_usage_snapshot(),
+            owner=audit_owner(_api_key),
+        )
+
     return StreamingResponse(
         stream_pipeline(
             payload=payload,
@@ -416,6 +444,7 @@ async def synthesize_stream(
             on_complete=_on_complete,
             run_config=services.run_config(),
             deadline_seconds=services.settings.request_deadline_seconds,
+            on_error=_on_error,
         ),
         media_type="text/event-stream",
         headers={

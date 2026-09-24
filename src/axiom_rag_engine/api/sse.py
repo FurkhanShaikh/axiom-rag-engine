@@ -26,7 +26,11 @@ import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
-from axiom_rag_engine.graph import finish_with_best_pass
+from axiom_rag_engine.graph import (
+    PipelineDeadlineError,
+    finish_with_best_pass,
+    with_failure_event,
+)
 from axiom_rag_engine.marshalling import marshal_response
 from axiom_rag_engine.utils.llm import LLMBudgetExceededError, get_llm_usage_snapshot
 
@@ -127,6 +131,7 @@ async def stream_pipeline(
     on_complete: Any | None = None,
     run_config: dict[str, Any] | None = None,
     deadline_seconds: float = 0.0,
+    on_error: Any | None = None,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE frames for one pipeline execution.
 
@@ -136,6 +141,9 @@ async def stream_pipeline(
     LangGraph (it carries the app's search backend). ``deadline_seconds`` (0 =
     none) bounds the run: on expiry the best verified pass is returned, or an
     ``error`` frame (``deadline_exceeded``) if no pass was verified yet.
+    ``on_error`` is awaited with the state reached so far (plus a
+    ``pipeline_failed`` audit event) before any ``error`` frame, so a failed
+    run's audit trail is kept.
     """
     event_id = 0
 
@@ -177,6 +185,16 @@ async def stream_pipeline(
     timeout_task: asyncio.Task[Any] | None = None
     deadline_at = time.monotonic() + deadline_seconds if deadline_seconds > 0 else None
     deadline_hit = False
+    current_node: str | None = None
+
+    async def _report_failure(exc: BaseException) -> None:
+        if on_error is None:
+            return
+        try:
+            await on_error(with_failure_event(accumulated, current_node, exc))
+        except Exception:
+            logger.exception("on_error hook failed for request %s", payload.request_id)
+
     try:
         stream_kwargs: dict[str, Any] = {"version": "v2"}
         if run_config is not None:
@@ -220,6 +238,7 @@ async def stream_pipeline(
                 continue
 
             if evt_type == "on_chain_start":
+                current_node = name
                 node_start_times[name] = time.monotonic()
                 loop_reason = _loop_reason(name, accumulated)
                 if loop_reason is not None:
@@ -283,6 +302,7 @@ async def stream_pipeline(
                 )
 
     except LLMBudgetExceededError as exc:
+        await _report_failure(exc)
         yield _sse(
             "error",
             {
@@ -296,6 +316,7 @@ async def stream_pipeline(
         )
         return
     except Exception as exc:
+        await _report_failure(exc)
         with contextlib.suppress(Exception):
             logger.exception(
                 "Unhandled pipeline error for request %s: %s",
@@ -329,6 +350,9 @@ async def stream_pipeline(
     if deadline_hit:
         final_state = finish_with_best_pass(cast("GraphState", accumulated), "deadline")
         if final_state is None:
+            await _report_failure(
+                PipelineDeadlineError("Request deadline expired before any verified pass.")
+            )
             yield _sse(
                 "error",
                 {
