@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Measured — ranking quality blend (RET-1)
+- `pipeline_retrieval_eval.py --sweep` compares a grid of quality weights with BM25 alone using paired-bootstrap intervals. On SciFact (188 claims) the shipped 0.4 blend never loses a claim and gains two or three; weights up to 0.2 change nothing and 0.8 adds at most one more. The shipped weights stay; the domain-authority half is still unmeasured on web-shaped data (BENCHMARKS.md → Quality-weight sweep).
+
+### Added — separate verification fields (VER-5; version 0.2.0b1)
+- **Every `verification` object gains `faithfulness`, `source_class` and `agreement`.** A tier mixed three questions — what was cited (1–2), whether the claim matches its source (3–5), and whether sources disagree (6) — which forced workarounds like "Tier 3, labelled unverified". `faithfulness` (`verified` / `misrepresented` / `not_found` / `not_checked`) is derived from the two checks; `source_class` (`primary` / `other` / `none`) records what was cited whatever the verdict; `agreement` (`corroborated` / `conflicted` / `not_checked`) is `corroborated` only when the corroboration check confirmed it. `tier` and `tier_label` are unchanged, and contradictory combinations (Tier 1 without a primary source, `conflicted` outside Tier 6) are rejected.
+- **`confidence_summary.grounding_score`** is the new name of `overall_score` (same value; `overall_score` is kept and marked deprecated). It measures grounding in sources, not answer correctness (ASQA: near-zero correlation).
+- Additive, so the minor version moves to 0.2.0b1.
+
+### Added — reproducible eval data (EVAL-7)
+- **`python tasks.py evals bundle -- pack | unpack`** packages eval results and the caches that pin live inputs (Tavily responses, rerank grades, paraphrases; embeddings optional) into one archive with a SHA-256 manifest and the git commit, for attaching to a GitHub release; `unpack` verifies the manifest (and refuses unsafe paths) before restoring. CI uploads the deterministic gate's per-query records as the `eval-gate-results` artifact. BENCHMARKS.md → *Raw data and reproduction* maps every table to its command, inputs and raw data.
+
+### Changed — corpus search speed (COR-5)
+- **Corpus search no longer re-reads every embedding per query.** Decoded vectors are cached per embedding model until the corpus version changes (any ingest or delete, from any process), so a query reads only the version counter and its top-k rows. With the new `vector` extra (numpy) scoring is vectorised: at 10k chunks a search takes 1.8 ms instead of 739 ms (`corpus_eval.py --bench-search`; BENCHMARKS.md). Without numpy the pure-Python path is used, about 2× faster than before.
+
+### Fixed — Docker image extras
+- **The Docker image now installs the `redis` extra** (and `vector`). Without it `AXIOM_REDIS_URL` fell back to per-process memory with a warning, so the compose stack's Redis was never used for the cache, rate limits or spend.
+
+### Changed — supply chain and compose (DEP-2)
+- **docker-compose pins its images** (`ollama/ollama:0.9.0`, `redis:7.4-alpine`, `prom/prometheus:v3.4.1`, `grafana/grafana:12.0.2`) instead of `:latest`; Dependabot now updates Docker and compose images.
+- **Ollama's port is no longer published.** It has no authentication and the engine reaches it over the compose network; pull models with `docker compose exec ollama ollama pull <model>`, or uncomment the localhost-only port mapping.
+- **CI scans the built image** with Trivy (fails on critical vulnerabilities that have a fix) and uploads a CycloneDX SBOM.
+
 ### Added — OpenRouter provider
 - **`OPENROUTER_API_KEY` is a first-class provider key.** With no Anthropic or OpenAI key, startup auto-selects `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (default `openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (default `openrouter/openai/gpt-4o-mini`, the same model as the OpenAI-key verifier). The key counts as an available provider for production's fail-closed check, is pushed to LiteLLM from `.env`, and is redacted by `check-config`.
 

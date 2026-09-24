@@ -33,7 +33,7 @@ import logging
 import re
 from collections.abc import Awaitable
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import litellm  # noqa: F401 — module attribute kept so tests can patch litellm.acompletion here
 
@@ -284,6 +284,21 @@ def _failed_semantic_verification(failure_reason: str) -> VerificationResult:
     )
 
 
+def _source_class(
+    verified_citations: list[VerifiedCitation],
+    chunk_lookup: dict[str, dict[str, Any]],
+    primary_domains: set[str],
+) -> Literal["primary", "other"]:
+    """'primary' when any cited page is a primary source, whatever the checks said."""
+    for citation in verified_citations:
+        chunk = chunk_lookup.get(citation.chunk_id, {})
+        if is_primary_source(
+            str(chunk.get("domain", "")), str(chunk.get("source_url", "")), primary_domains
+        ):
+            return "primary"
+    return "other"
+
+
 def _aggregate_sentence_verification(
     verified_citations: list[VerifiedCitation],
     chunk_lookup: dict[str, dict[str, Any]],
@@ -466,7 +481,8 @@ async def _apply_corroboration_gate(
         )
     )
     if corroborated:
-        return provisional  # genuine multi-source corroboration
+        # Genuine multi-source corroboration.
+        return provisional.model_copy(update={"agreement": "corroborated"})
     return _tier3_not_corroborated(
         "Sources cover different aspects of the claim but do not independently corroborate it."
     )
@@ -910,7 +926,7 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                 "no source quote was checked."
                 if has_checkable_content(claim_text)
                 else "Uncited sentence — no source quote was checked.",
-            )
+            ).model_copy(update={"source_class": "none"})
             final_slots.append(
                 FinalSentence(
                     sentence_id=sentence_id,
@@ -1070,12 +1086,14 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
         )
 
     for slot, sentence_id, claim_text, verified_citations, _ in gated:
+        verdict = verdicts[slot]
+        source_class = _source_class(verified_citations, chunk_lookup, primary_domains)
         final_slots[slot] = FinalSentence(
             sentence_id=sentence_id,
             text=claim_text,
             is_cited=True,
             citations=verified_citations,
-            verification=verdicts[slot],
+            verification=verdict.model_copy(update={"source_class": source_class}),
         ).model_dump()
     final_sentences = [slot for slot in final_slots if slot is not None]
 

@@ -1,11 +1,15 @@
 """SQLite-backed corpus store for ingested documents (bring-your-own corpus).
 
 Single-node and dependency-light: ``sqlite3`` + ``struct`` from the stdlib, no
-vector-DB server and no numpy. Chunk embeddings are stored as packed float32
-blobs and searched by brute-force cosine in Python — the same pure-Python
-similarity the ranker already uses, and fast enough at single-node corpus scale
-(thousands of chunks). If a corpus outgrows brute force, the eval harness will
-show it before users feel it.
+vector-DB server. Chunk embeddings are stored as packed float32 blobs and
+searched by brute-force cosine similarity.
+
+Search keeps a decoded copy of each embedding model's vectors in memory, keyed
+by the corpus version counter (bumped by every ingest and delete), so a query
+reads SQLite only for that counter and its top-``k`` rows. Scoring uses numpy
+when it is installed (the ``vector`` extra) and pure Python otherwise; results
+are identical up to float32 rounding. ``evals/corpus_eval.py --bench-search``
+measures both (see BENCHMARKS.md).
 
 Embedding-space safety
 ----------------------
@@ -35,12 +39,20 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import json
 import sqlite3
 import struct
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+try:  # optional: vectorised scoring (the "vector" extra)
+    import numpy as _np
+except ImportError:  # pragma: no cover - exercised when numpy is absent
+    _np = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Value types
@@ -106,6 +118,43 @@ def _unpack_embedding(blob: bytes) -> list[float]:
 def _dot(a: list[float], b: list[float]) -> float:
     """Dot product; equals cosine because stored/query vectors are L2-normalized."""
     return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+@dataclass
+class _VectorIndex:
+    """One embedding model's vectors of one dimension, as of a corpus version.
+
+    ``rowids`` identify each vector's chunk; ``matrix`` is an ``(n, dim)``
+    float32 array with numpy, else a list of vectors.
+    """
+
+    version: int
+    rowids: list[int]
+    matrix: Any
+
+
+def _build_matrix(blobs: list[bytes], dim: int, use_numpy: bool) -> Any:
+    if use_numpy and _np is not None:
+        if not blobs:
+            return _np.zeros((0, dim), dtype=_np.float32)
+        return _np.frombuffer(b"".join(blobs), dtype="<f4").reshape(len(blobs), dim)
+    return [_unpack_embedding(b) for b in blobs]
+
+
+def _top_k(matrix: Any, query: list[float], k: int, use_numpy: bool) -> list[tuple[int, float]]:
+    """(position, score) of the ``k`` best rows, best first; ties keep row order."""
+    if use_numpy and _np is not None:
+        if len(matrix) == 0:
+            return []
+        scores = matrix @ _np.asarray(query, dtype=_np.float32)
+        if k < len(scores):
+            candidates = _np.argpartition(-scores, k - 1)[:k]
+        else:
+            candidates = _np.arange(len(scores))
+        order = sorted(candidates.tolist(), key=lambda i: (-float(scores[i]), i))
+        return [(i, float(scores[i])) for i in order]
+    scored = ((i, _dot(query, vec)) for i, vec in enumerate(matrix))
+    return heapq.nlargest(k, scored, key=lambda pair: pair[1])
 
 
 def _content_sha(texts: list[str]) -> str:
@@ -204,8 +253,13 @@ class CorpusStore:
             anything that must persist across calls.
     """
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, use_numpy: bool = True) -> None:
         self._db_path = str(db_path)
+        # Decoded vectors per (embedding model, dim), rebuilt when the corpus
+        # version moves. Searches run in worker threads, hence the lock.
+        self._use_numpy = use_numpy and _np is not None
+        self._indexes: dict[tuple[str, int], _VectorIndex] = {}
+        self._index_lock = threading.Lock()
         if self._db_path != ":memory:":
             Path(self._db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
             self._db_path = str(Path(self._db_path).expanduser())
@@ -376,22 +430,28 @@ class CorpusStore:
         if k <= 0 or not query_embedding:
             return []
         qdim = len(query_embedding)
+        index = self._vector_index(embedding_model, qdim)
+        top = _top_k(index.matrix, query_embedding, k, self._use_numpy)
+        if not top:
+            return []
 
+        rowids = [index.rowids[i] for i, _ in top]
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT c.chunk_id, c.doc_id, c.chunk_index, c.text, c.dim, c.embedding, "
+                "SELECT c.rowid, c.chunk_id, c.doc_id, c.chunk_index, c.text, "
                 "       d.title, d.source "
                 "FROM chunks c JOIN documents d ON c.doc_id = d.doc_id "
-                "WHERE d.embedding_model = ?",
-                (embedding_model,),
+                "WHERE c.rowid IN (SELECT value FROM json_each(?))",
+                (json.dumps(rowids),),
             ).fetchall()
+        by_rowid = {r["rowid"]: r for r in rows}
 
-        scored: list[ScoredChunk] = []
-        for r in rows:
-            if r["dim"] != qdim:
+        hits: list[ScoredChunk] = []
+        for (_, score), rowid in zip(top, rowids, strict=True):
+            r = by_rowid.get(rowid)
+            if r is None:  # deleted since the index was read; the next search rebuilds
                 continue
-            score = _dot(query_embedding, _unpack_embedding(r["embedding"]))
-            scored.append(
+            hits.append(
                 ScoredChunk(
                     chunk_id=r["chunk_id"],
                     doc_id=r["doc_id"],
@@ -402,7 +462,45 @@ class CorpusStore:
                     source=r["source"],
                 )
             )
-        return heapq.nlargest(k, scored, key=lambda c: c.score)
+        return hits
+
+    def _vector_index(self, embedding_model: str, dim: int) -> _VectorIndex:
+        """The decoded vectors for ``embedding_model`` at ``dim``, current as of
+        the corpus version (one small query when nothing changed)."""
+        key = (embedding_model, dim)
+        with closing(self._connect()) as conn:
+            version = int(
+                conn.execute("SELECT value FROM corpus_meta WHERE key = 'version'").fetchone()[0]
+            )
+            cached = self._indexes.get(key)
+            if cached is not None and cached.version == version:
+                return cached
+            with self._index_lock:
+                cached = self._indexes.get(key)
+                if cached is not None and cached.version == version:
+                    return cached
+                # One read transaction: the version and the rows it describes
+                # come from the same snapshot.
+                conn.execute("BEGIN")
+                version = int(
+                    conn.execute("SELECT value FROM corpus_meta WHERE key = 'version'").fetchone()[
+                        0
+                    ]
+                )
+                rows = conn.execute(
+                    "SELECT c.rowid, c.embedding "
+                    "FROM chunks c JOIN documents d ON c.doc_id = d.doc_id "
+                    "WHERE d.embedding_model = ? AND c.dim = ? ORDER BY c.rowid",
+                    (embedding_model, dim),
+                ).fetchall()
+                conn.execute("COMMIT")
+                index = _VectorIndex(
+                    version=version,
+                    rowids=[r["rowid"] for r in rows],
+                    matrix=_build_matrix([r["embedding"] for r in rows], dim, self._use_numpy),
+                )
+                self._indexes[key] = index
+                return index
 
 
 def _row_to_meta(row: sqlite3.Row) -> DocumentMeta:

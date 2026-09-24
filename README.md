@@ -29,6 +29,10 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv add axiom-rag-engine
 ```
 
+Optional extras: `redis` (shared cache, rate limits and spend across replicas)
+and `vector` (numpy-scored corpus search, ~400× faster at 10k chunks), e.g.
+`pip install "axiom-rag-engine[redis,vector]"`. The Docker image includes both.
+
 ## Quick start
 
 ### From PyPI
@@ -140,6 +144,24 @@ sentences is `partial`. An uncited sentence that carries checkable content
 (numbers, or names beyond its first word) reads as a claim nobody checked, so it
 also makes the response `partial`. `confidence_summary` reports
 `uncited_sentences` and `uncited_checkable_sentences`.
+
+### Verification fields
+
+A tier mixes three separate questions: what was cited (Tiers 1–2), whether the
+claim matches its source (Tiers 3–5), and whether sources disagree (Tier 6).
+Every `verification` object (per sentence and per citation) also answers them
+one at a time, so clients need not decode the tier:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `faithfulness` | `verified` · `misrepresented` · `not_found` · `not_checked` | Did the claim match its source? Derived from the two checks: quote found and judged faithful, quote found but distorted, quote not in the source, or a check did not run (uncited, semantic check disabled or unavailable). |
+| `source_class` | `primary` · `other` · `none` | What was cited: a primary source (the Tier 1 domain rules), anything else, or nothing (uncited). Set whatever the verdict — a misrepresented quote from a `.gov` page is still `primary`. |
+| `agreement` | `corroborated` · `conflicted` · `not_checked` | Were the sources compared? `corroborated` only when the corroboration check (`AXIOM_CORROBORATION_ENABLED`) confirmed it, `conflicted` exactly at Tier 6, otherwise `not_checked` — multi-domain Tier 2 alone is coverage, not agreement. |
+
+`tier` and `tier_label` are unchanged. `confidence_summary.grounding_score` is
+the new name of `overall_score` (same value; the old name stays): a
+tier-weighted measure of how well cited claims are grounded in their sources,
+not a probability that the answer is correct.
 
 Each passing citation also carries `matched_source_text`: the exact text of the
 source the quote matched (original casing and punctuation), so clients can
@@ -465,6 +487,13 @@ Endpoints once the stack is healthy:
 - Prometheus — http://localhost:9090
 - Grafana    — http://localhost:3000  (login `admin` / `admin`)
   → *Dashboards → Axiom → Axiom Engine*
+
+Ollama is not published to the host (it has no authentication); the engine
+reaches it over the compose network. Pull a model into it with
+`docker compose exec ollama ollama pull qwen3:8b`. Sidecar images are pinned to
+versions and kept current by Dependabot, and CI scans the built engine image
+with Trivy (failing on fixable critical vulnerabilities) and keeps a CycloneDX
+SBOM as a build artifact.
 
 To run without the observability sidecars, comment out the `redis`,
 `prometheus`, and `grafana` services.

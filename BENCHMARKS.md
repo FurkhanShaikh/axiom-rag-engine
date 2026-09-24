@@ -267,6 +267,50 @@ The **pool=10, production** row is a per-PR gate (`tasks.py evals gate`). The
 run is deterministic, so its floors are pinned to the observed values: a single
 claim changing its outcome fails CI.
 
+#### Quality-weight sweep (2026-09-24)
+
+`pipeline_retrieval_eval.py --limit 0 --sweep` (pool 10, all 188 claims): each
+quality weight against BM25 alone on the same claims, with 95% paired-bootstrap
+intervals of the difference.
+
+| quality weight | p@1 | MRR | evidence recall |
+|---|---|---|---|
+| 0 (BM25 only) | 0.644 | 0.742 | 0.963 |
+| 0.1 | 0.644 (±0) | 0.742 (±0) | 0.963 (±0) |
+| 0.2 | 0.644 (±0) | 0.742 (±0) | 0.963 (±0) |
+| **0.4 (shipped)** | **0.654 (+0.011 [0, +0.027])** | **0.748 (+0.006 [0, +0.014])** | **0.968 (+0.005 [0, +0.016])** |
+| 0.6 | 0.654 (+0.011 [0, +0.027]) | 0.748 (+0.006 [0, +0.014]) | 0.968 (+0.005 [0, +0.016]) |
+| 0.8 | 0.660 (+0.016 [0, +0.037]) | 0.751 (+0.009 [+0.001, +0.019]) | 0.968 (+0.005 [0, +0.016]) |
+
+**Decision: keep the shipped 0.6 / 0.4 blend.** Up to 0.2 the heuristics never
+change a ranking; from 0.4 they move two or three claims, always for the better,
+and never cost one — so on this data the blend is harmless and at best slightly
+helpful, and there is no measured case for removing it. Raising it further buys
+at most one more claim (only MRR at 0.8 clears zero, barely), which is not
+worth a larger bet on unvalidated heuristics. Two limits remain: domain
+authority is constant on SciFact, so this sweep measures only the chunk
+heuristics; and the domain signal also feeds the tier, so it counts twice. Both
+need web-shaped data (the cached Tavily results from the query-expansion eval)
+to settle; rerun `--sweep` on such a pool before changing the weights.
+
+### Corpus search latency (2026-09-24)
+
+`CorpusStore.search` over 10,000 synthetic 768-dim chunks, k=50, 30 queries, on
+the 4-core CI-class container these numbers were taken on
+(`python evals/corpus_eval.py --bench-search 10000`). Speed only — the vectors
+are random, so this says nothing about retrieval quality.
+
+| Search path | mean | p95 |
+|---|---|---|
+| Uncached, pure Python (every query re-reads and decodes every vector — how search worked before) | 739 ms | 782 ms |
+| Cached vectors, pure Python | 331 ms | 344 ms |
+| Cached vectors, numpy (`vector` extra) | **1.8 ms** | **2.0 ms** |
+
+Caching the decoded vectors per corpus version halves the cost; vectorised
+scoring removes almost all of the rest. Brute force stays linear in corpus
+size, so pure Python is still slow at this scale — install the `vector` extra
+(the Docker image does) for any corpus beyond a few thousand chunks.
+
 ### Query expansion — live web (2026-09-22)
 
 Do the retriever's extra searches earn their cost? `evals/query_expansion_eval.py`
@@ -422,6 +466,36 @@ python tasks.py evals e2e -- --model gpt-4o-mini
 
 See [`evals/README.md`](evals/README.md) for the harness internals and
 [`evals/gate.py`](evals/gate.py) for the gate contract.
+
+## Raw data and reproduction
+
+Every table above can be regenerated; how depends on whether its inputs are
+fixed or live.
+
+| Table | Reproduce with | Inputs | Raw per-query records |
+|---|---|---|---|
+| Retrieval — SciFact dev (BM25 row) | `python tasks.py evals retrieval -- --limit 0` | public dataset, deterministic | `eval-gate-results` artifact of every CI run |
+| Production-shaped retrieval, quality-weight sweep | `python tasks.py evals pipeline-retrieval -- --limit 0 [--sweep]` | public dataset, deterministic | `eval-gate-results` artifact (pool 10 row) |
+| End-to-end golden set (deterministic) | `python tasks.py evals e2e -- --validate-only` | committed golden set | `eval-gate-results` artifact |
+| Corpus search latency | `python evals/corpus_eval.py --bench-search 10000` | synthetic, seeded | printed |
+| Dense / hybrid / rerank / paraphrase rows | `python tasks.py evals retrieval -- --method …` | local embedder or LLM grades, LLM paraphrases | evals bundle (caches) |
+| Query expansion, tier calibration | the eval commands above | **live** Tavily results + LLM judge | evals bundle (Tavily caches pin the results) |
+| Semantic verifier, keyed e2e | the eval commands above | provider model | evals bundle |
+
+Live search results drift, so the web-shaped numbers are only reproducible
+from the cached responses they were measured on. After a run worth
+publishing, bundle the raw results and caches (SHA-256 manifest and commit
+included) and attach the archive to a GitHub release:
+
+```bash
+python tasks.py evals bundle -- pack            # evals-bundle-<date>.tar.gz
+python tasks.py evals bundle -- unpack evals-bundle-<date>.tar.gz   # verify + restore
+```
+
+`unpack` refuses an archive whose files do not match its manifest. With the
+caches restored, rerunning an eval (or only its judging phase, e.g.
+`calibration --phase judge --judge <model>`) grades the same search results the
+published table used.
 
 ## Recording the baseline
 

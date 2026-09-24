@@ -5,9 +5,9 @@ All I/O contracts for the API Gateway and the LangGraph DAG.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, StrictBool, model_validator
+from pydantic import BaseModel, Field, StrictBool, computed_field, model_validator
 
 # ---------------------------------------------------------------------------
 # INPUT MODELS
@@ -260,8 +260,56 @@ class VerificationResult(BaseModel):
     mechanical_check: Literal["passed", "failed", "skipped"]
     semantic_check: Literal["passed", "failed", "skipped"]
     failure_reason: str | None = None
+    # The tier mixes three questions; these answer them separately (VER-5).
+    source_class: Literal["primary", "other", "none"] = Field(
+        default="other",
+        description=(
+            "What was cited: 'primary' when a cited page is on an official / "
+            "configured primary-source domain, 'none' for an uncited sentence, "
+            "'other' otherwise."
+        ),
+    )
+    agreement: Literal["corroborated", "conflicted", "not_checked"] = Field(
+        default="not_checked",
+        description=(
+            "Whether the cited sources were compared: 'corroborated' when the "
+            "corroboration check confirmed two or more sources independently "
+            "support the claim, 'conflicted' when they contradict each other (Tier "
+            "6), 'not_checked' when no cross-source check ran."
+        ),
+    )
 
     model_config = {"frozen": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _defaults_implied_by_the_tier(cls, data: Any) -> Any:
+        """Tier 1 implies a primary source and Tier 6 a conflict; fill those in
+        when a producer (or an older payload) does not say."""
+        if isinstance(data, dict):
+            data = dict(data)
+            data.pop("faithfulness", None)  # derived; accepted back from a dump
+            if data.get("tier") == 1:
+                data.setdefault("source_class", "primary")
+            if data.get("tier") == 6:
+                data.setdefault("agreement", "conflicted")
+        return data
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def faithfulness(self) -> Literal["verified", "misrepresented", "not_found", "not_checked"]:
+        """Whether the claim matches its source, from the two checks alone:
+        'verified' (quote found and judged faithful), 'misrepresented' (quote
+        found, claim distorts it), 'not_found' (quote not in the source), or
+        'not_checked' (a check did not run: uncited, semantic check disabled or
+        unavailable)."""
+        if self.mechanical_check == "failed":
+            return "not_found"
+        if self.mechanical_check == "passed" and self.semantic_check == "failed":
+            return "misrepresented"
+        if self.mechanical_check == "passed" and self.semantic_check == "passed":
+            return "verified"
+        return "not_checked"
 
     @model_validator(mode="after")
     def validate_tier_contract(self) -> VerificationResult:
@@ -282,6 +330,10 @@ class VerificationResult(BaseModel):
                 raise ValueError("tier_label='unverified' is only valid at tier 3.")
             if self.mechanical_check == "passed" and self.semantic_check == "passed":
                 raise ValueError("tier_label='unverified' cannot be used when both checks passed.")
+        if self.tier == 1 and self.source_class != "primary":
+            raise ValueError("Tier 1 requires source_class='primary'.")
+        if (self.tier == 6) != (self.agreement == "conflicted"):
+            raise ValueError("agreement='conflicted' is exactly Tier 6.")
         if self.tier_label == "model_assisted" and self.mechanical_check != "passed":
             raise ValueError(
                 "tier_label='model_assisted' promises a verbatim quote and requires "
@@ -392,7 +444,12 @@ class TierBreakdown(BaseModel):
 
 
 class ConfidenceSummary(BaseModel):
-    overall_score: float = Field(..., ge=0.0, le=1.0)
+    overall_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Deprecated name of grounding_score (same value); kept for compatibility.",
+    )
     tier_breakdown: TierBreakdown
     uncited_sentences: int = Field(
         default=0,
@@ -407,6 +464,21 @@ class ConfidenceSummary(BaseModel):
             "they read as claims. Any makes the response status 'partial'."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_derived(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "grounding_score" in data:
+            data = {k: v for k, v in data.items() if k != "grounding_score"}
+        return data
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def grounding_score(self) -> float:
+        """How well the cited claims are grounded in their sources (tier-weighted
+        mean over cited sentences). Not a probability that the answer is correct:
+        on ASQA its correlation with answer correctness was near zero."""
+        return self.overall_score
 
 
 # ---------------------------------------------------------------------------

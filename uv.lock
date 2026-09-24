@@ -208,7 +208,7 @@ wheels = [
 
 [[package]]
 name = "axiom-rag-engine"
-version = "0.1.0b2"
+version = "0.2.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
@@ -240,6 +240,10 @@ dependencies = [
 redis = [
     { name = "redis" },
 ]
+vector = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -261,6 +265,7 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.2.28" },
     { name = "langgraph", specifier = ">=1.1,<2.0" },
     { name = "litellm", specifier = ">=1.82,<2.0" },
+    { name = "numpy", marker = "extra == 'vector'", specifier = ">=1.26" },
     { name = "opentelemetry-api", specifier = ">=1.27" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.27" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.48b0" },
@@ -281,7 +286,7 @@ requires-dist = [
     { name = "trafilatura", specifier = ">=1.6" },
     { name = "uvicorn", specifier = ">=0.32,<1.0" },
 ]
-provides-extras = ["redis"]
+provides-extras = ["redis", "vector"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -213,6 +213,8 @@ def evals() -> None:
         python tasks.py evals gate                                    # deterministic CI gate (no LLM)
         python tasks.py evals e2e -- --validate-only --gate           # same, explicit
         python tasks.py evals semantic -- --model gpt-4o-mini --gate  # keyed gate
+        python tasks.py evals bundle -- pack                          # results + caches for a release
+        python tasks.py evals bundle -- unpack evals-bundle-<date>.tar.gz
     """
     args = sys.argv[2:]
     scripts = {
@@ -225,6 +227,7 @@ def evals() -> None:
         "corpus": "evals/corpus_eval.py",
         "query-expansion": "evals/query_expansion_eval.py",
         "calibration": "evals/calibration_eval.py",
+        "bundle": "evals/bundle.py",
     }
     # `gate` is the CI entry point: the two deterministic gates, no LLM keys —
     # end-to-end golden set answerability + retrieval quality (BM25 over SciFact).
@@ -239,7 +242,7 @@ def evals() -> None:
     if not args or args[0] not in scripts:
         _echo(
             "Usage: python tasks.py evals "
-            "<download|download-asqa|download-beir|semantic|e2e|retrieval|pipeline-retrieval|corpus|query-expansion|calibration|gate> [-- <args>]"
+            "<download|download-asqa|download-beir|semantic|e2e|retrieval|pipeline-retrieval|corpus|query-expansion|calibration|bundle|gate> [-- <args>]"
         )
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]
