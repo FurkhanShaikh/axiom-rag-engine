@@ -6,6 +6,7 @@ Extracted from main.py — these are pure domain functions with no HTTP dependen
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from axiom_rag_engine.models import ConfidenceSummary, TierBreakdown
@@ -33,6 +34,30 @@ _TIER_WEIGHTS: dict[int, float] = {
 # "unverified"): the quote is verbatim but faithfulness is unknown, so it scores
 # well below a checked Tier 3 claim.
 _UNVERIFIED_WEIGHT = 0.30
+
+
+# A digit anywhere, or a capitalised word after the first (a name, a place, an
+# organisation). Sentence-initial capitals and the pronoun "I" do not count.
+_DIGIT_RE = re.compile(r"\d")
+_WORD_RE = re.compile(r"[^\W\d_][\w'’-]*")
+
+
+def has_checkable_content(text: str) -> bool:
+    """Whether an uncited sentence carries content a source could confirm or refute.
+
+    The synthesizer may leave only transitional or summary sentences uncited, but
+    nothing enforced that: an uncited "Tesla sold 1.8 million cars in 2023" was
+    ignored by the status and the score. Numbers and names are the cheap,
+    deterministic signal that a sentence states a fact rather than connects two.
+    """
+    if _DIGIT_RE.search(text):
+        return True
+    words = _WORD_RE.findall(text)
+    return any(w[0].isupper() and w != "I" for w in words[1:])
+
+
+def _is_uncited_checkable(sentence: dict[str, Any]) -> bool:
+    return not sentence.get("is_cited") and has_checkable_content(str(sentence.get("text", "")))
 
 
 def _is_claim(sentence: dict[str, Any]) -> bool:
@@ -75,6 +100,8 @@ def compute_confidence_summary(
     return ConfidenceSummary(
         overall_score=overall,
         tier_breakdown=breakdown,
+        uncited_sentences=sum(1 for s in final_sentences if not _is_claim(s)),
+        uncited_checkable_sentences=sum(1 for s in final_sentences if _is_uncited_checkable(s)),
     )
 
 
@@ -92,7 +119,9 @@ def determine_status(
       - "partial" if any cited sentence is Tier 4, 5, or 6, or is labelled
         "unverified" (its semantic check could not run), or if the answer has
         no cited sentence at all (nothing in it was checked).
-      - Uncited (transitional) sentences are ignored for the decision.
+      - "partial" if an uncited sentence carries checkable content (numbers or
+        names): it reads as a claim, yet nothing in it was checked.
+      - Other uncited (transitional) sentences are ignored for the decision.
       - "error" comes only from exception handling, not here.
 
     M8 fix: empty final_sentences with is_answerable=True previously returned
@@ -110,6 +139,9 @@ def determine_status(
     claims = [s for s in final_sentences if _is_claim(s)]
     if not claims:
         # Text was produced but none of it was checked against a source.
+        return "partial"
+
+    if any(_is_uncited_checkable(s) for s in final_sentences):
         return "partial"
 
     for s in claims:
