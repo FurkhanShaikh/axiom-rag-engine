@@ -36,7 +36,7 @@ from axiom_rag_engine.state import (
     reset_verification_state,
     rewrites_remaining,
 )
-from axiom_rag_engine.utils.audit import make_audit_event
+from axiom_rag_engine.utils.audit import error_fields, make_audit_event
 
 logger = logging.getLogger("axiom_rag_engine.graph")
 
@@ -210,10 +210,8 @@ def _fail_soft(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
         except Exception as exc:
             if not _has_verified_pass(state):
                 raise
-            # Error type only: provider messages can carry account details.
-            return _halt_with_best_pass(
-                state, name, "node_error", {"error_type": type(exc).__name__}
-            )
+            logger.warning("Node %s failed after a verified pass: %r", name, exc)
+            return _halt_with_best_pass(state, name, "node_error", error_fields(exc))
         if (
             name == "synthesizer"
             and _has_verified_pass(state)

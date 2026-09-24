@@ -12,6 +12,16 @@ from typing import Any
 from uuid import uuid4
 
 
+def error_fields(exc: BaseException) -> dict[str, str]:
+    """Audit-safe description of an exception: its type only.
+
+    Audit trails reach callers (``include_debug``, ``GET /v1/audits``), and
+    provider or search-backend messages can carry keys, internal URLs, or
+    account details. Log the full exception server-side instead.
+    """
+    return {"error_type": type(exc).__name__}
+
+
 def make_audit_event(
     node: str,
     event_type: str,
