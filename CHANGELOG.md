@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — CI tested stale dependency locks
+- **Dependency bumps are now tested at their new versions.** Dependabot ran in `pip` mode, which edits `pyproject.toml` but not `uv.lock`, and CI installed with `uv sync --frozen`, which does not check the lock against `pyproject.toml`, so bump PRs passed while testing the old locked versions (the fastapi, pydantic, httpx and pytest bumps never touched `uv.lock`). Dependabot now uses its `uv` ecosystem, which updates the lock, and CI installs with `uv sync --locked`, which fails on a stale lock.
+
 ### Measured — ranking quality blend (RET-1)
 - `pipeline_retrieval_eval.py --sweep` compares a grid of quality weights with BM25 alone using paired-bootstrap intervals. On SciFact (188 claims) the shipped 0.4 blend never loses a claim and gains two or three; weights up to 0.2 change nothing and 0.8 adds at most one more. The shipped weights stay; the domain-authority half is still unmeasured on web-shaped data (BENCHMARKS.md → Quality-weight sweep).
 

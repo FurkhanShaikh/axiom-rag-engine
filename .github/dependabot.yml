@@ -1,6 +1,9 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  # "uv" (not "pip") so bumps update uv.lock too: CI installs with
+  # `uv sync --locked`, which fails on a lock that no longer matches
+  # pyproject.toml, so a bump is always tested at its new version.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"

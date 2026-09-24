@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Ruff lint
         run: uv run ruff check .
       - name: Ruff format check
@@ -32,7 +32,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Mypy type checking
         run: uv run mypy src
 
@@ -48,7 +48,7 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Run tests
         run: uv run pytest -m "not integration" --cov=axiom_rag_engine --cov-report=term-missing
 
@@ -69,7 +69,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Download SciFact
         # The BM25 retrieval gate scores against SciFact, which is gitignored
         # (evals/data/), so it must be fetched here. ~3 MB, no keys.
@@ -96,7 +96,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Dependency vulnerability scan
         run: uv run pip-audit
 

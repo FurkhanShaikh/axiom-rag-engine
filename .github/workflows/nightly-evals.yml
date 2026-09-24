@@ -70,7 +70,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.guard.outputs.run == 'true'
-        run: uv sync --frozen
+        run: uv sync --locked
 
       - name: Download SciFact
         if: steps.guard.outputs.run == 'true'
