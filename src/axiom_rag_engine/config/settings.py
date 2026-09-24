@@ -466,13 +466,26 @@ class Settings(BaseSettings):
         return self.env.lower() not in self._NON_PROD_ENVS
 
     def redacted_dict(self) -> dict[str, Any]:
-        """Return settings as a dict with secrets masked. Used by `check-config`."""
+        """Return settings as a dict with secrets masked. Used by `check-config`.
+
+        Secrets are recognised by field name (``_SECRET_FIELD_SUFFIXES``), so a
+        secret added later is masked by default rather than printed.
+        """
         data = self.model_dump()
-        if data.get("api_keys"):
-            data["api_keys"] = [f"***{len(k)}" for k in data["api_keys"]]
+        for name, value in data.items():
+            if not value or not name.endswith(_SECRET_FIELD_SUFFIXES):
+                continue
+            if isinstance(value, list):
+                data[name] = [f"***{len(str(v))}" for v in value]
+            else:
+                data[name] = f"***{len(str(value))}"
         if data.get("redis_url"):
             data["redis_url"] = _redact_url(data["redis_url"])
         return data
+
+
+# Settings fields holding credentials; their values never leave redacted_dict.
+_SECRET_FIELD_SUFFIXES = ("api_key", "api_keys", "_token", "_secret", "_password")
 
 
 def _redact_url(url: str) -> str:
