@@ -9,6 +9,11 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "deps"
+    # Minor and patch bumps land as one PR (each bump rewrites uv.lock, so
+    # separate PRs conflict with each other); major bumps stay individual.
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
 
   # Base image in the Dockerfile and the pinned sidecar images in compose.
   - package-ecosystem: "docker"

@@ -51,6 +51,26 @@ jobs:
       - name: Run tests
         run: uv run pytest -m "not integration" --cov=axiom_rag_engine --cov-report=term-missing
 
+  test-image-python:
+    # The suite on whatever Python the Docker image ships, read from the
+    # Dockerfile, so a base-image bump (e.g. from Dependabot) is tested on the
+    # version it would actually run even when it is outside the matrix above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the image's Python version
+        id: py
+        run: |
+          version=$(sed -nE 's/^FROM python:([0-9]+\.[0-9]+).*/\1/p' Dockerfile | head -1)
+          test -n "$version" || { echo "::error::no 'FROM python:X.Y' in Dockerfile"; exit 1; }
+          echo "Docker image Python: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup
+        with:
+          python-version: ${{ steps.py.outputs.version }}
+      - name: Run tests on the image's Python
+        run: uv run pytest -m "not integration" -q -p no:cacheprovider
+
   evals-gate:
     # Deterministic quality gates — no LLM keys, no cost. Three checks:
     #   1. Golden set through the retriever/scorer/ranker + pre-LLM
@@ -103,7 +123,10 @@ jobs:
           set -euo pipefail
           trap 'docker logs axiom-smoke || true; docker rm -f axiom-smoke smoke-redis >/dev/null 2>&1 || true' EXIT
           docker network create smoke
-          docker run -d --name smoke-redis --network smoke redis:7.4-alpine
+          # The same Redis image docker-compose runs, so the two cannot drift.
+          redis_image=$(sed -nE 's/^ *image: (redis:[^ ]+).*/\1/p' docker-compose.yml | head -1)
+          test -n "$redis_image"
+          docker run -d --name smoke-redis --network smoke "$redis_image"
           docker run -d --name axiom-smoke --network smoke -p 8000:8000 \
             -e AXIOM_ENV=development \
             -e AXIOM_REDIS_URL=redis://smoke-redis:6379/0 \
@@ -141,3 +164,15 @@ jobs:
         with:
           name: sbom
           path: sbom.cdx.json
+
+  compose-smoke:
+    # The whole docker-compose stack, started and checked service by service
+    # (.github/scripts/compose-smoke.sh): engine ready with Redis as cache,
+    # engine -> Ollama reachable, Prometheus scraping the engine, Grafana
+    # healthy with the dashboard and datasource provisioned. Makes image bumps
+    # to any compose service testable without running the stack by hand.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start and check the stack
+        run: .github/scripts/compose-smoke.sh

@@ -33,15 +33,29 @@ services:
 
   # ── Ollama (local LLM sidecar) ────────────────────────────────────────────
   # Comment this section out if you are using only cloud APIs (Anthropic/OpenAI).
+  # Named volumes are created root-owned, so the unprivileged UID below could
+  # write neither its models nor its key (Ollama crash-looped on
+  # "mkdir /.ollama: permission denied"). This one-shot step hands the volume
+  # to that UID before Ollama starts.
+  ollama-init:
+    image: busybox:1.37
+    command: ["chown", "-R", "1000:1000", "/home/ollama"]
+    volumes:
+      - ollama_models:/home/ollama
+
   ollama:
     image: ollama/ollama:0.9.0
     container_name: axiom-ollama
     # Run as a non-root numeric UID/GID (no user account required in the image).
-    # OLLAMA_MODELS overrides the default /root/.ollama path so the process can
-    # write to the volume without needing root access.
+    # HOME and OLLAMA_MODELS point at the volume, which ollama-init made
+    # writable for this UID: Ollama keeps its key in $HOME/.ollama.
     user: "1000:1000"
     environment:
-      OLLAMA_MODELS: /models
+      HOME: /home/ollama
+      OLLAMA_MODELS: /home/ollama/models
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
     # Not published: Ollama has no authentication, and the engine reaches it
     # over the compose network. Pull models with
     #   docker compose exec ollama ollama pull qwen3:8b
@@ -49,7 +63,7 @@ services:
     # ports:
     #   - "127.0.0.1:11434:11434"
     volumes:
-      - ollama_models:/models
+      - ollama_models:/home/ollama
     healthcheck:
       # The ollama/ollama image does not guarantee curl; the CLI is always there.
       test: ["CMD", "ollama", "list"]
