@@ -157,6 +157,47 @@
           "legendFormat": "5xx/min"
         }
       ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "LLM tokens / min by model",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (model, kind) (rate(axiom_llm_tokens_total[5m])) * 60",
+          "legendFormat": "{{model}} / {{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "LLM spend (USD / hour) by model",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 12, "y": 27, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (model) (rate(axiom_llm_cost_usd_total[5m])) * 3600",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "LLM spend, last 24h",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"x": 20, "y": 27, "w": 4, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(increase(axiom_llm_cost_usd_total[24h]))",
+          "legendFormat": "USD"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
     }
   ]
 }

@@ -8,13 +8,16 @@ setup_tracing() once at startup in the FastAPI lifespan.
 from __future__ import annotations
 
 import functools
+import hmac
 import logging
 import os
+from collections.abc import Awaitable, Callable
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
-from prometheus_client import Counter, Histogram
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, Histogram, generate_latest
 
 logger = logging.getLogger("axiom_rag_engine.observability")
 
@@ -85,17 +88,38 @@ LLM_COST_USD_TOTAL = Counter(
 _prometheus_initialized = False
 
 
-def setup_prometheus(app: FastAPI) -> None:
-    """Instrument the FastAPI app with Prometheus metrics (idempotent)."""
+def setup_prometheus(
+    app: FastAPI, metrics_token: str | None = None
+) -> Callable[[Request], Awaitable[Response]]:
+    """Serve ``/metrics`` on ``app`` and return its endpoint.
+
+    HTTP request metrics are instrumented once per process (their collectors
+    are process-wide). The endpoint is added to every app; with
+    ``metrics_token`` it requires ``Authorization: Bearer <token>``, since the
+    metrics expose model usage and spend.
+    """
     global _prometheus_initialized
-    if _prometheus_initialized:
-        return
+    if not _prometheus_initialized:
+        from prometheus_fastapi_instrumentator import Instrumentator
 
-    from prometheus_fastapi_instrumentator import Instrumentator
+        Instrumentator().instrument(app)
+        _prometheus_initialized = True
 
-    Instrumentator().instrument(app).expose(app, include_in_schema=False)
-    _prometheus_initialized = True
-    logger.info("Prometheus metrics enabled at /metrics.")
+    expected = f"Bearer {metrics_token}".encode() if metrics_token else None
+
+    async def metrics(request: Request) -> Response:
+        if expected is not None:
+            given = request.headers.get("authorization", "").encode()
+            if not hmac.compare_digest(given, expected):
+                return Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
+        return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
+
+    app.add_api_route("/metrics", metrics, methods=["GET"], include_in_schema=False)
+    logger.info(
+        "Prometheus metrics at /metrics (%s).",
+        "bearer token required" if expected else "unauthenticated",
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------

@@ -483,6 +483,13 @@ class Settings(BaseSettings):
         ge=0,
         description="Number of recent audit trails to keep in memory for GET /v1/audits/{request_id}. 0 = disabled.",
     )
+    metrics_token: str | None = Field(
+        default=None,
+        description=(
+            "If set, GET /metrics requires 'Authorization: Bearer <token>'. The "
+            "metrics include model usage and spend. Unset = unauthenticated."
+        ),
+    )
     log_audit_events: bool = Field(
         default=False,
         description="When true, every audit event is emitted as a structured log line (best with LOG_FORMAT=json).",

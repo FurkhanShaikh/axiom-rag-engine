@@ -159,7 +159,8 @@ def create_app(
     app.middleware("http")(
         make_body_size_middleware(config.max_body_bytes, config.max_document_bytes)
     )
-    setup_prometheus(app)
+    # Scrapes are not rate-limited; protect them with AXIOM_METRICS_TOKEN instead.
+    limiter.exempt(setup_prometheus(app, config.metrics_token))
     instrument_app(app)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 

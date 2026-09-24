@@ -93,6 +93,7 @@ resolved configuration.
 | `AXIOM_MAX_RAW_CONTENT_CHARS` | `200000` | Per-document cap on full page text. Oversized pages are truncated, not dropped. |
 | `AXIOM_AUDIT_RETENTION` | `0` | Retain the last N audit trails in memory for `/v1/audits/{id}`. |
 | `AXIOM_LOG_AUDIT_EVENTS` | `false` | Emit each audit event as a structured log line. |
+| `AXIOM_METRICS_TOKEN` | _(empty)_ | If set, `GET /metrics` requires `Authorization: Bearer <token>` (the metrics include model usage and spend). Scrapes are never rate-limited. |
 | `LOG_FORMAT` | `text` | `json` for structured log output. |
 
 See [.env.example](.env.example) for the full list with comments.

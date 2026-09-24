@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`app_config.source_weight` and `chunk_weight` must sum to 1.0.** Nothing checked it, so `{"source_weight": 0.5}` scored with 0.5 + the default 0.6. A single weight now implies its pair (`0.5` → `0.5/0.5`); a pair that does not sum to 1.0 is rejected with 422.
 - Chunking's English-only sentence rules are documented (BENCHMARKS.md → Honest caveats).
 
+### Changed — observability hygiene (OBS-5)
+- **`AXIOM_METRICS_TOKEN` protects `/metrics`.** When set, scrapes need `Authorization: Bearer <token>` (the metrics include model usage and spend); `deploy/prometheus/prometheus.yml` shows the scrape setting. `/metrics` is now served by every app built with `create_app` (it was only on the first one in a process) and is exempt from rate limiting.
+- **The request-ID log prefix no longer stacks.** The text formatter prefixed the shared log record in place, so a second handler printed `[id] [id] …`; it now formats a copy.
+- **Grafana: token and spend panels** — tokens/min by model, USD/hour by model, and spend over the last 24 h.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 
