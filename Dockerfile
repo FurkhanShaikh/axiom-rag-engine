@@ -15,11 +15,13 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 
 # Install runtime dependencies into an isolated venv (no dev extras).
 # --frozen: honour uv.lock exactly; --no-install-project: deps only, not src yet.
-RUN uv sync --frozen --no-dev --no-install-project
+# Extras: redis (without it AXIOM_REDIS_URL silently falls back to per-process
+# memory, so the compose stack's Redis went unused) and vector (numpy corpus search).
+RUN uv sync --frozen --no-dev --extra redis --extra vector --no-install-project
 
 # Copy source and install the project itself.
 COPY src/ ./src/
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --extra redis --extra vector
 
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
