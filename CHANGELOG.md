@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`confidence_summary.grounding_score`** is the new name of `overall_score` (same value; `overall_score` is kept and marked deprecated). It measures grounding in sources, not answer correctness (ASQA: near-zero correlation).
 - Additive, so the minor version moves to 0.2.0b1.
 
+### Added — reproducible eval data (EVAL-7)
+- **`python tasks.py evals bundle -- pack | unpack`** packages eval results and the caches that pin live inputs (Tavily responses, rerank grades, paraphrases; embeddings optional) into one archive with a SHA-256 manifest and the git commit, for attaching to a GitHub release; `unpack` verifies the manifest (and refuses unsafe paths) before restoring. CI uploads the deterministic gate's per-query records as the `eval-gate-results` artifact. BENCHMARKS.md → *Raw data and reproduction* maps every table to its command, inputs and raw data.
+
 ### Changed — corpus search speed (COR-5)
 - **Corpus search no longer re-reads every embedding per query.** Decoded vectors are cached per embedding model until the corpus version changes (any ingest or delete, from any process), so a query reads only the version counter and its top-k rows. With the new `vector` extra (numpy) scoring is vectorised: at 10k chunks a search takes 1.8 ms instead of 739 ms (`corpus_eval.py --bench-search`; BENCHMARKS.md). Without numpy the pure-Python path is used, about 2× faster than before.
 

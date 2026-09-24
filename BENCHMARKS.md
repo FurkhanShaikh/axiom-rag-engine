@@ -467,6 +467,36 @@ python tasks.py evals e2e -- --model gpt-4o-mini
 See [`evals/README.md`](evals/README.md) for the harness internals and
 [`evals/gate.py`](evals/gate.py) for the gate contract.
 
+## Raw data and reproduction
+
+Every table above can be regenerated; how depends on whether its inputs are
+fixed or live.
+
+| Table | Reproduce with | Inputs | Raw per-query records |
+|---|---|---|---|
+| Retrieval — SciFact dev (BM25 row) | `python tasks.py evals retrieval -- --limit 0` | public dataset, deterministic | `eval-gate-results` artifact of every CI run |
+| Production-shaped retrieval, quality-weight sweep | `python tasks.py evals pipeline-retrieval -- --limit 0 [--sweep]` | public dataset, deterministic | `eval-gate-results` artifact (pool 10 row) |
+| End-to-end golden set (deterministic) | `python tasks.py evals e2e -- --validate-only` | committed golden set | `eval-gate-results` artifact |
+| Corpus search latency | `python evals/corpus_eval.py --bench-search 10000` | synthetic, seeded | printed |
+| Dense / hybrid / rerank / paraphrase rows | `python tasks.py evals retrieval -- --method …` | local embedder or LLM grades, LLM paraphrases | evals bundle (caches) |
+| Query expansion, tier calibration | the eval commands above | **live** Tavily results + LLM judge | evals bundle (Tavily caches pin the results) |
+| Semantic verifier, keyed e2e | the eval commands above | provider model | evals bundle |
+
+Live search results drift, so the web-shaped numbers are only reproducible
+from the cached responses they were measured on. After a run worth
+publishing, bundle the raw results and caches (SHA-256 manifest and commit
+included) and attach the archive to a GitHub release:
+
+```bash
+python tasks.py evals bundle -- pack            # evals-bundle-<date>.tar.gz
+python tasks.py evals bundle -- unpack evals-bundle-<date>.tar.gz   # verify + restore
+```
+
+`unpack` refuses an archive whose files do not match its manifest. With the
+caches restored, rerunning an eval (or only its judging phase, e.g.
+`calibration --phase judge --judge <model>`) grades the same search results the
+published table used.
+
 ## Recording the baseline
 
 The regression gate needs defensible floors before it can block. To activate

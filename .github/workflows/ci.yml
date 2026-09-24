@@ -78,6 +78,14 @@ jobs:
         env:
           AXIOM_ENV: development
         run: uv run python tasks.py evals gate
+      # Per-query records behind the gated numbers, for any PR or commit.
+      - name: Upload gate results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eval-gate-results
+          path: evals/results/*.json
+          if-no-files-found: warn
 
   security:
     runs-on: ubuntu-latest
