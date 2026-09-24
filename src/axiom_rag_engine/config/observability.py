@@ -54,6 +54,11 @@ LOOP_EXHAUSTED_TIER5 = Counter(
     "axiom_loop_exhausted_tier5_total",
     "Tier 5 sentences that survived all rewrite and retrieval retries and reached the final response",
 )
+LLM_RETRIES = Counter(
+    "axiom_llm_retries_total",
+    "LLM calls retried after a transient provider failure (rate limit, timeout, 5xx)",
+    ["node", "model"],
+)
 NODE_DURATION = Histogram(
     "axiom_node_duration_seconds",
     "Wall-clock duration of each graph node execution",

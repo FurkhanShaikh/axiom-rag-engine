@@ -319,6 +319,22 @@ class Settings(BaseSettings):
         ge=1,
         description="Maximum concurrent in-flight LLM calls across all requests.",
     )
+    llm_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description=(
+            "Retries for a transient provider failure (rate limit, timeout, connection "
+            "drop, 5xx) on one LLM call. 0 disables retries. A retry does not consume "
+            "extra per-request call budget."
+        ),
+    )
+    llm_retry_max_wait_seconds: float = Field(
+        default=8.0,
+        ge=0.0,
+        le=60.0,
+        description="Upper bound on one retry backoff (also caps a provider's Retry-After).",
+    )
     allowed_metric_models: CommaSepList = Field(
         default_factory=lambda: [
             # Claude 5 family

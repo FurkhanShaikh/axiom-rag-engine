@@ -13,11 +13,15 @@ import contextlib
 import contextvars
 import functools
 import json
+import logging
+import random
 import re
 import time
 from typing import Any
 
 from axiom_rag_engine.config.settings import get_settings
+
+logger = logging.getLogger("axiom_rag_engine.llm")
 
 # Default timeout for all LLM calls.  Local models (Ollama) on CPU-only hardware
 # can be slow on large prompts — 600 s is the ceiling; cloud models finish in <10 s.
@@ -295,6 +299,86 @@ def build_completion_kwargs(
 
 
 # ---------------------------------------------------------------------------
+# Transient-failure retries
+# ---------------------------------------------------------------------------
+
+# Status codes worth retrying: request timeout, rate limit, server errors, and
+# Anthropic's 529 "overloaded".
+_TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
+_TRANSIENT_ERROR_NAMES = (
+    "RateLimitError",
+    "APIConnectionError",  # includes litellm.Timeout
+    "InternalServerError",
+    "ServiceUnavailableError",
+    "BadGatewayError",
+)
+_RETRY_BASE_SECONDS = 0.5
+
+
+def is_transient_llm_error(exc: BaseException) -> bool:
+    """True for provider failures that a retry can fix: rate limits, timeouts,
+    dropped connections, and 5xx. Auth, bad-request, and content errors are not."""
+    import litellm
+
+    transient_types = tuple(
+        t
+        for t in (getattr(litellm, name, None) for name in _TRANSIENT_ERROR_NAMES)
+        if isinstance(t, type)
+    )
+    if transient_types and isinstance(exc, transient_types):
+        return True
+    return getattr(exc, "status_code", None) in _TRANSIENT_STATUS_CODES
+
+
+def _retry_delay(exc: BaseException, attempt: int, max_wait: float) -> float:
+    """Seconds to wait before retry ``attempt`` (0-based).
+
+    Honours a provider ``Retry-After`` header when present; otherwise uses
+    exponential backoff with full jitter. Always capped at ``max_wait``.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            return min(max_wait, max(0.0, float(headers.get("retry-after"))))
+    return random.uniform(0.0, min(max_wait, _RETRY_BASE_SECONDS * 2**attempt))  # noqa: S311
+
+
+async def _acompletion_with_retry(node: str, model: str, kwargs: dict[str, Any]) -> Any:
+    """``litellm.acompletion`` with retries for transient provider failures.
+
+    The concurrency semaphore is held per attempt, never across a backoff sleep,
+    so a throttled call does not block other requests while it waits.
+    """
+    import litellm
+
+    from axiom_rag_engine.config.observability import LLM_RETRIES, safe_model_label
+
+    settings = get_settings()
+    attempt = 0
+    while True:
+        try:
+            async with get_llm_semaphore():
+                return await litellm.acompletion(**kwargs)
+        except Exception as exc:
+            if attempt >= settings.llm_max_retries or not is_transient_llm_error(exc):
+                raise
+            delay = _retry_delay(exc, attempt, settings.llm_retry_max_wait_seconds)
+            attempt += 1
+            LLM_RETRIES.labels(node=node, model=safe_model_label(model)).inc()
+            logger.warning(
+                "Transient %s error from %s (%s); retry %d/%d in %.1fs.",
+                node,
+                model,
+                type(exc).__name__,
+                attempt,
+                settings.llm_max_retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+# ---------------------------------------------------------------------------
 # The single LLM call path
 # ---------------------------------------------------------------------------
 
@@ -316,14 +400,15 @@ async def call_llm(
         (``LLMBudgetExceededError`` propagates unwrapped — callers decide whether
         to degrade or abort, and the endpoint maps it to HTTP 429);
       - the global concurrency semaphore bounds in-flight calls;
+      - transient provider failures (rate limit, timeout, 5xx) are retried up
+        to ``AXIOM_LLM_MAX_RETRIES`` times with backoff, within one budget unit;
       - duration, tokens, and cost are recorded under ``node``;
       - provider quirks come from :func:`build_completion_kwargs`; pass
         ``json_schema`` to request schema-conforming output where supported.
 
-    Provider errors propagate unchanged. ``None`` content becomes ``""``.
+    Non-transient provider errors, and transient ones that outlast the retries,
+    propagate unchanged. ``None`` content becomes ``""``.
     """
-    import litellm
-
     from axiom_rag_engine.config.observability import (
         LLM_CALL_DURATION,
         get_tracer,
@@ -343,8 +428,7 @@ async def call_llm(
     with get_tracer().start_as_current_span(f"{node}.llm_call", attributes={"model": model}):
         consume_llm_budget(node)
         start = time.monotonic()
-        async with get_llm_semaphore():
-            response = await litellm.acompletion(**kwargs)
+        response = await _acompletion_with_retry(node, model, kwargs)
         LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
             time.monotonic() - start
         )
