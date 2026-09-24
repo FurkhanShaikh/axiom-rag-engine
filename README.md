@@ -1,6 +1,6 @@
 # Axiom Engine
 
-**Citation-verified RAG with 5-tier confidence scoring.**
+**Citation-verified RAG with tiered confidence scoring.**
 
 Axiom Engine is a retrieval-augmented generation (RAG) service that
 verifies every cited claim before presenting answers. Every claim carries a
@@ -8,8 +8,9 @@ verbatim source quote that is checked against the retrieved page
 deterministically, then judged for faithfulness by a model, and assigned a
 confidence tier.
 
-A sixth tier (Conflicted) is defined in the response schema but is **not
-implemented** — the verifier never assigns it today. See
+Tiers 1–5 are always assigned. A sixth tier (Conflicted), for sentences whose
+cited sources contradict each other, is opt-in
+(`AXIOM_CONTRADICTION_DETECTION_ENABLED`) and never assigned unless enabled. See
 [Verification tiers](#verification-tiers).
 
 Verification quality is measured, not asserted: see [BENCHMARKS.md](BENCHMARKS.md)
@@ -73,6 +74,8 @@ resolved configuration.
 | `AXIOM_DEFAULT_VERIFIER_MODEL` | `gpt-4o-mini` | LiteLLM model ID for semantic verification. |
 | `AXIOM_ALLOWED_SYNTHESIZER_MODELS` | _(empty)_ | Synthesizer models callers may request besides the default when auth is required (others get 422). The verifier is always server-controlled when auth is required. |
 | `AXIOM_LLM_MAX_RETRIES` | `2` | Retries for transient provider failures (rate limit, timeout, 5xx) per LLM call. |
+| `AXIOM_LLM_TIMEOUT_SECONDS` | `120` | Timeout for one LLM call. Raise it for slow local models. |
+| `AXIOM_REQUEST_DEADLINE_SECONDS` | `300` | Wall-clock limit per pipeline run. On expiry after a verified pass that pass is returned (`partial`); before one, HTTP 504. `0` disables. |
 | `AXIOM_EMBEDDING_MODEL` | _(empty)_ | LiteLLM embedding model to enable hybrid (BM25 + dense) ranking, e.g. `ollama/nomic-embed-text` or `text-embedding-3-small`. Empty = BM25-only. See [Hybrid retrieval](#hybrid-retrieval). |
 | `AXIOM_RRF_K` | `60` | Reciprocal-rank-fusion constant for hybrid ranking. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |

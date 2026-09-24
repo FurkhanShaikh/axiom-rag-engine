@@ -2,9 +2,14 @@
 
 Axiom's claim is that it verifies citations. That claim is only credible with
 numbers, so this page is where the verification quality is measured and
-published. The measurements come from the eval harness in [`evals/`](evals/),
-which runs the **production** verification code path — not a reimplementation of
-it — so the numbers reflect what a caller actually gets.
+published. The measurements come from the eval harness in [`evals/`](evals/).
+The semantic-verifier, golden, and calibration evals run the **production** code
+path. The retrieval eval does not yet: it re-implements BM25 over whole SciFact
+abstracts (a fast path pinned to the production scoring function by a unit
+test), and its hybrid and rerank methods are separate eval-side
+implementations — so its numbers describe the ranking method, not the shipped
+ranker's chunked, quality-blended ranking. Moving it onto the production ranker
+is tracked in #51.
 
 ## What is measured
 
@@ -27,8 +32,7 @@ the ranker is scored as a standard IR system:
 | `MRR` | Mean reciprocal rank of the first gold document |
 
 This runs with no keys and is fully deterministic, so it gates every PR — and
-it is the baseline that hybrid retrieval and a reranker (roadmap Phase 1) must
-beat.
+it is the baseline that hybrid retrieval and a reranker must beat.
 
 ### Semantic verifier metrics
 
