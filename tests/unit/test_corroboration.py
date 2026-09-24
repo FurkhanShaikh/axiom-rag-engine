@@ -164,6 +164,7 @@ class TestCorroborationGate:
             result = await semantic_verifier_node(_state())
         vr = result["final_sentences"][0]["verification"]
         assert vr["tier"] == 2
+        assert vr["agreement"] == "not_checked"  # Tier 2 is coverage here, not agreement
         # No corroboration call: every call was a semantic check.
         systems = [c.kwargs["messages"][0]["content"].lower() for c in mock.call_args_list]
         assert not any("corroborate" in s for s in systems)
@@ -174,6 +175,7 @@ class TestCorroborationGate:
         result = await _run('{"corroborated": true, "reasoning": "both state 60 votes"}')
         vr = result["final_sentences"][0]["verification"]
         assert vr["tier"] == 2
+        assert vr["agreement"] == "corroborated"
         assert any(e["event_type"] == "corroboration_result" for e in result["audit_trail"])
 
     async def test_enabled_and_not_corroborated_downgrades_to_tier_3(self, monkeypatch) -> None:
@@ -182,6 +184,7 @@ class TestCorroborationGate:
         result = await _run('{"corroborated": false, "reasoning": "different facts"}')
         vr = result["final_sentences"][0]["verification"]
         assert vr["tier"] == 3
+        assert vr["agreement"] == "not_checked"
         assert vr["failure_reason"] and "corroborate" in vr["failure_reason"].lower()
 
     async def test_check_error_fails_safe_to_tier_3(self, monkeypatch) -> None:

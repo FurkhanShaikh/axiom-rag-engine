@@ -1,6 +1,6 @@
 [project]
 name = "axiom-rag-engine"
-version = "0.1.0b2"
+version = "0.2.0b1"
 description = "Citation-verified RAG service with deterministic + semantic claim verification."
 readme = "README.md"
 license = { file = "LICENSE" }

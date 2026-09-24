@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Measured — ranking quality blend (RET-1)
 - `pipeline_retrieval_eval.py --sweep` compares a grid of quality weights with BM25 alone using paired-bootstrap intervals. On SciFact (188 claims) the shipped 0.4 blend never loses a claim and gains two or three; weights up to 0.2 change nothing and 0.8 adds at most one more. The shipped weights stay; the domain-authority half is still unmeasured on web-shaped data (BENCHMARKS.md → Quality-weight sweep).
 
+### Added — separate verification fields (VER-5; version 0.2.0b1)
+- **Every `verification` object gains `faithfulness`, `source_class` and `agreement`.** A tier mixed three questions — what was cited (1–2), whether the claim matches its source (3–5), and whether sources disagree (6) — which forced workarounds like "Tier 3, labelled unverified". `faithfulness` (`verified` / `misrepresented` / `not_found` / `not_checked`) is derived from the two checks; `source_class` (`primary` / `other` / `none`) records what was cited whatever the verdict; `agreement` (`corroborated` / `conflicted` / `not_checked`) is `corroborated` only when the corroboration check confirmed it. `tier` and `tier_label` are unchanged, and contradictory combinations (Tier 1 without a primary source, `conflicted` outside Tier 6) are rejected.
+- **`confidence_summary.grounding_score`** is the new name of `overall_score` (same value; `overall_score` is kept and marked deprecated). It measures grounding in sources, not answer correctness (ASQA: near-zero correlation).
+- Additive, so the minor version moves to 0.2.0b1.
+
 ### Changed — corpus search speed (COR-5)
 - **Corpus search no longer re-reads every embedding per query.** Decoded vectors are cached per embedding model until the corpus version changes (any ingest or delete, from any process), so a query reads only the version counter and its top-k rows. With the new `vector` extra (numpy) scoring is vectorised: at 10k chunks a search takes 1.8 ms instead of 739 ms (`corpus_eval.py --bench-search`; BENCHMARKS.md). Without numpy the pure-Python path is used, about 2× faster than before.
 
