@@ -6,7 +6,7 @@ run, so the corpus matrix is cached to disk keyed by (model, corpus content).
 A cache hit makes subsequent runs instant.
 
 This is eval-side machinery on purpose: it proves whether dense retrieval helps
-*before* the embedder is wired into the production pipeline (roadmap 1.1). If
+*before* the embedder is wired into the production pipeline. If
 hybrid earns its keep here, this batching + caching pattern is the template for
 the production embedder.
 """

@@ -49,5 +49,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/health/ready || exit 1
 
-# Uvicorn: single worker per container; scale horizontally via compose/k8s.
+# Uvicorn: single worker per container. Only the response cache is shared
+# (via Redis); rate limits, the LLM concurrency limit, the audit store, and the
+# SQLite corpus are per process, so replicas do not share them (see #57).
 CMD ["uvicorn", "axiom_rag_engine.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
