@@ -105,9 +105,12 @@ class Settings(BaseSettings):
         default="production",
         description="Runtime environment. Non-production values disable auth requirements.",
     )
-    docs_enabled: bool = Field(
-        default=True,
-        description="If false, /docs and /redoc are disabled.",
+    docs_enabled: bool | None = Field(
+        default=None,
+        description=(
+            "Serve /docs and /redoc. Unset: on when auth is disabled (development), "
+            "off when auth is required, so production does not publish its API schema."
+        ),
     )
 
     # ── Auth ─────────────────────────────────────────────────────────────
@@ -469,8 +472,27 @@ class Settings(BaseSettings):
     _NON_PROD_ENVS = frozenset({"development", "dev", "local", "test"})
 
     def auth_required(self) -> bool:
-        """Return True unless the runtime env is an explicit non-prod alias."""
+        """Whether requests must carry a valid API key.
+
+        Configured keys are always enforced: a deployment that set
+        AXIOM_API_KEYS but mistyped or copied AXIOM_ENV (``dev``, ``test``)
+        used to run with every endpoint open. Without keys, auth is off only
+        for an explicit non-production environment.
+        """
+        if any(self.api_keys) or any(self.admin_api_keys):
+            return True
         return self.env.lower() not in self._NON_PROD_ENVS
+
+    def is_production(self) -> bool:
+        """Whether the environment is production, which makes startup fail closed
+        (no LLM provider, or mock search without AXIOM_ALLOW_MOCK_SEARCH, refuses
+        to boot). Separate from ``auth_required``: a developer who configures
+        keys locally gets authentication, not production strictness."""
+        return self.env.lower() not in self._NON_PROD_ENVS
+
+    def docs_on(self) -> bool:
+        """Whether to serve /docs and /redoc (see ``docs_enabled``)."""
+        return self.docs_enabled if self.docs_enabled is not None else not self.auth_required()
 
     def redacted_dict(self) -> dict[str, Any]:
         """Return settings as a dict with secrets masked. Used by `check-config`.

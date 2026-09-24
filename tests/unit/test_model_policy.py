@@ -68,10 +68,10 @@ class _Recorder:
         return _reply(_SEMANTIC)
 
 
-def _app(env: str, **overrides: Any) -> Any:
+def _app(env: str, keys: tuple[str, ...] = (KEY,), **overrides: Any) -> Any:
     settings = Settings(
         env=env,
-        api_keys=[KEY],
+        api_keys=list(keys),
         allow_mock_search=True,
         default_synthesizer_model="server/synth",
         default_verifier_model="server/verifier",
@@ -135,7 +135,8 @@ class TestProduction:
 
 class TestAuthDisabled:
     def test_caller_models_are_honoured(self, recorder: _Recorder) -> None:
-        with TestClient(_app("test")) as client:
+        # Auth is off only without keys: configured keys are always enforced.
+        with TestClient(_app("test", keys=())) as client:
             resp = _post(client, {"synthesizer": "any/synth", "verifier": "any/verifier"})
         assert resp.status_code == 200, resp.text
         assert recorder.models == {"synthesizer": {"any/synth"}, "verifier": {"any/verifier"}}

@@ -67,7 +67,7 @@ resolved configuration.
 
 | Variable | Default | Description |
 |---|---|---|
-| `AXIOM_ENV` | `production` | Runtime environment. Set to `development` to disable auth. |
+| `AXIOM_ENV` | `production` | Runtime environment. Production fails closed at startup (no LLM provider or live search → refuse to boot). A non-production value disables auth **only when no API keys are configured**: configured keys are always enforced. |
 | `AXIOM_API_KEYS` | _(empty)_ | Comma-separated API keys. Required when env != development. |
 | `AXIOM_ADMIN_API_KEYS` | _(empty)_ | Keys allowed to ingest and delete corpus documents when auth is required (they are also valid API keys). Empty = corpus writes are refused. |
 | `TAVILY_API_KEY` | _(empty)_ | Tavily search API key for live web retrieval. |
@@ -83,7 +83,7 @@ resolved configuration.
 | `AXIOM_CACHE_TTL_SECONDS` | `300` | Response cache TTL. |
 | `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for distributed cache. |
 | `AXIOM_CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins. |
-| `AXIOM_DOCS_ENABLED` | `true` | Set `false` to disable /docs and /redoc. |
+| `AXIOM_DOCS_ENABLED` | _(auto)_ | Serve /docs and /redoc. Unset: on when auth is disabled, off when auth is required. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
 | `AXIOM_CORROBORATION_ENABLED` | `false` | When true, Tier 2 requires ≥2 sources to *corroborate* the claim (an extra verifier call), not just cite ≥2 domains. See [Verification tiers](#verification-tiers). |
 | `AXIOM_FETCH_FULL_PAGES` | `true` | Verify citations against full page text rather than search snippets. See [Verification sources](#verification-sources). |
