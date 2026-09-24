@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed — LLM concurrency pools
 - **Verification calls no longer queue behind synthesis calls.** One process-wide semaphore (`AXIOM_MAX_CONCURRENT_LLM`) covered every LLM call, so slow synthesis calls could hold every slot while cheap verifier calls waited. Synthesis, verification (semantic, corroboration, contradiction) and auxiliary calls (reranker, embeddings) now have separate pools. `AXIOM_MAX_CONCURRENT_LLM` bounds synthesis and auxiliary calls as before; the new `AXIOM_MAX_CONCURRENT_VERIFIER_LLM` bounds verification (unset = the same value). Total in-flight calls can therefore reach the sum of the pools. The limits remain per process.
 
+### Changed — scaling out (DEP-1)
+- **Rate limits are shared across replicas through Redis.** With `AXIOM_REDIS_URL` set, slowapi's counters live in Redis (prefix `axiom:ratelimit`, 0.5 s socket timeouts), so N replicas enforce one limit instead of N. While Redis is unreachable each replica falls back to its own in-memory counters. Without Redis, or without the `redis` extra, limits stay per process (logged at startup).
+- **README → Scaling out** lists what replicas share and what they don't (LLM concurrency limits, audit trails and the SQLite corpus are per process; run a single corpus writer). The Dockerfile no longer implies the rest is shared.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

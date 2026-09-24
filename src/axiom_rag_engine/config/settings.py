@@ -170,7 +170,10 @@ class Settings(BaseSettings):
     )
     redis_url: str | None = Field(
         default=None,
-        description="If set, use Redis for the response cache instead of in-memory TTLCache.",
+        description=(
+            "If set, use Redis for the response cache and rate-limit counters (shared "
+            "across replicas) instead of per-process memory."
+        ),
         alias="AXIOM_REDIS_URL",
     )
 

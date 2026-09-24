@@ -83,7 +83,7 @@ resolved configuration.
 | `AXIOM_RRF_K` | `60` | Reciprocal-rank-fusion constant for hybrid ranking. |
 | `AXIOM_RATE_LIMIT` | `20/minute` | Rate limit per API key or IP. |
 | `AXIOM_CACHE_TTL_SECONDS` | `300` | Response cache TTL. |
-| `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for distributed cache. |
+| `AXIOM_REDIS_URL` | _(empty)_ | Optional Redis URL for the response cache and rate-limit counters, shared across replicas (see [Scaling out](#scaling-out)). |
 | `AXIOM_CORS_ORIGINS` | _(empty)_ | Comma-separated allowed CORS origins. |
 | `AXIOM_DOCS_ENABLED` | _(auto)_ | Serve /docs and /redoc. Unset: on when auth is disabled, off when auth is required. |
 | `AXIOM_SEMANTIC_VERIFICATION_ENABLED` | `true` | Enable/disable Stage 2 semantic verification. |
@@ -458,6 +458,20 @@ Endpoints once the stack is healthy:
 
 To run without the observability sidecars, comment out the `redis`,
 `prometheus`, and `grafana` services.
+
+### Scaling out
+
+Each container runs one Uvicorn worker. Running several replicas behind a load
+balancer works for the query path when they share Redis (`AXIOM_REDIS_URL`,
+with the `redis` extra installed):
+
+| State | Shared across replicas? |
+|---|---|
+| Response cache | Yes, through Redis |
+| Rate limits (`AXIOM_RATE_LIMIT`, `AXIOM_STREAM_RATE_LIMIT`) | Yes, through Redis. If Redis is unreachable, each replica counts on its own until it recovers. Without Redis, N replicas allow N times the rate. |
+| LLM concurrency limits (`AXIOM_MAX_CONCURRENT_LLM`, `AXIOM_MAX_CONCURRENT_VERIFIER_LLM`) | No: per process. Divide the provider's limit by the replica count. |
+| Audit trails (`GET /v1/audits/{id}`) | No: a trail is only on the replica that served the request. Use `AXIOM_LOG_AUDIT_EVENTS=true` to ship them to your log pipeline. |
+| Corpus (SQLite) | No: one file per replica. Run a single writer (one replica that receives ingestion) or serve corpus retrieval from one replica; replicas sharing a file over a network filesystem is not supported. |
 
 ## License
 
