@@ -17,6 +17,7 @@ import logging
 import math
 import re
 from collections import Counter
+from collections.abc import Hashable, Sequence
 from functools import partial
 from typing import Any
 
@@ -258,6 +259,18 @@ def compute_ranking_score(
 # ---------------------------------------------------------------------------
 
 
+def rrf_scores(rankings: Sequence[Sequence[Hashable]], k: int) -> dict[Hashable, float]:
+    """Reciprocal-rank fusion: each item scores ``sum(1 / (k + rank + 1))`` over
+    the rankings it appears in (rank 0-based). Fusing ranks, not raw scores,
+    needs no calibration between differently scaled rankers. Shared with the
+    retrieval eval so the benchmark scores the shipped fusion."""
+    scores: dict[Hashable, float] = {}
+    for ranking in rankings:
+        for rank, item in enumerate(ranking):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+    return scores
+
+
 async def _apply_hybrid_fusion(
     user_query: str,
     ranked: list[dict[str, Any]],
@@ -297,12 +310,9 @@ async def _apply_hybrid_fusion(
     # between the two different scales.
     a_order = sorted(range(len(ranked)), key=lambda i: (-ranked[i]["ranking_score"], i))
     b_order = sorted(range(len(ranked)), key=lambda i: (-dense[i], i))
-    a_rank = {idx: rank for rank, idx in enumerate(a_order)}
-    b_rank = {idx: rank for rank, idx in enumerate(b_order)}
+    fused = rrf_scores([a_order, b_order], rrf_k)
     for i, chunk in enumerate(ranked):
-        chunk["fused_score"] = round(
-            1.0 / (rrf_k + a_rank[i] + 1) + 1.0 / (rrf_k + b_rank[i] + 1), 6
-        )
+        chunk["fused_score"] = round(fused[i], 6)
     ranked.sort(key=lambda c: (-c["fused_score"], c["chunk_id"]))
     audit.append(
         _audit(
@@ -358,6 +368,26 @@ def _parse_rerank_grade(raw: str) -> int:
     return int(match.group(1))
 
 
+def rerank_messages(query: str, passage: str) -> list[dict[str, str]]:
+    """The grading prompt for one (query, passage) pair, passage capped.
+    Shared with the retrieval eval so it grades with the shipped prompt."""
+    return [
+        {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": _RERANK_USER_TEMPLATE.format(
+                query=query, passage=passage[:_RERANK_MAX_PASSAGE_CHARS]
+            ),
+        },
+    ]
+
+
+def order_by_grade(grades: Sequence[int]) -> list[int]:
+    """Indices sorted by grade descending, prior position as the tiebreak — a
+    refinement of the incoming order, never a reshuffle of equal grades."""
+    return sorted(range(len(grades)), key=lambda i: (-grades[i], i))
+
+
 async def _grade_chunk(user_query: str, chunk_text: str, model: str) -> int:
     """Grade one (query, chunk) pair 0-3 via a single LLM call.
 
@@ -366,15 +396,7 @@ async def _grade_chunk(user_query: str, chunk_text: str, model: str) -> int:
     """
     from axiom_rag_engine.utils.llm import call_llm
 
-    messages = [
-        {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": _RERANK_USER_TEMPLATE.format(
-                query=user_query, passage=chunk_text[:_RERANK_MAX_PASSAGE_CHARS]
-            ),
-        },
-    ]
+    messages = rerank_messages(user_query, chunk_text)
     # json_mode=False: we want a bare integer, not a JSON object.
     raw = await call_llm(
         "reranker", model, messages, json_mode=False, max_tokens=_RERANK_MAX_TOKENS
@@ -426,8 +448,7 @@ async def _apply_reranker(
 
     for chunk, grade in zip(head, grades, strict=True):
         chunk["rerank_grade"] = grade
-    order = sorted(range(len(head)), key=lambda i: (-grades[i], i))
-    ranked[:top_k] = [head[i] for i in order]
+    ranked[:top_k] = [head[i] for i in order_by_grade(grades)]
 
     audit.append(
         _audit(

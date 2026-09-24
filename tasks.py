@@ -220,6 +220,7 @@ def evals() -> None:
         "semantic": "evals/semantic_verifier_eval.py",
         "e2e": "evals/e2e_eval.py",
         "retrieval": "evals/retrieval_eval.py",
+        "pipeline-retrieval": "evals/pipeline_retrieval_eval.py",
         "corpus": "evals/corpus_eval.py",
         "query-expansion": "evals/query_expansion_eval.py",
         "calibration": "evals/calibration_eval.py",
@@ -229,6 +230,7 @@ def evals() -> None:
     if args and args[0] == "gate":
         _run("uv", "run", "python", "evals/e2e_eval.py", "--validate-only", "--gate")
         _run("uv", "run", "python", "evals/retrieval_eval.py", "--limit", "0", "--gate")
+        _run("uv", "run", "python", "evals/pipeline_retrieval_eval.py", "--limit", "0", "--gate")
         return
     if args and args[0] == "download-asqa":
         _run("uv", "run", "python", "evals/download_datasets.py", "asqa")
@@ -236,7 +238,7 @@ def evals() -> None:
     if not args or args[0] not in scripts:
         _echo(
             "Usage: python tasks.py evals "
-            "<download|download-asqa|download-beir|semantic|e2e|retrieval|corpus|query-expansion|calibration|gate> [-- <args>]"
+            "<download|download-asqa|download-beir|semantic|e2e|retrieval|pipeline-retrieval|corpus|query-expansion|calibration|gate> [-- <args>]"
         )
         sys.exit(1)
     passthrough = [a for a in args[1:] if a != "--"]
