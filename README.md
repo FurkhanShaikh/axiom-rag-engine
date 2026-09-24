@@ -488,6 +488,11 @@ Endpoints once the stack is healthy:
 - Grafana    — http://localhost:3000  (login `admin` / `admin`)
   → *Dashboards → Axiom → Axiom Engine*
 
+Released images are published to GitHub's container registry on every version
+tag — `docker pull ghcr.io/furkhanshaikh/axiom-rag-engine:<version>` (`:latest`
+tracks the newest final release, never a pre-release). Each is scanned before
+it is pushed, and its CycloneDX SBOM is attached to the GitHub Release.
+
 Ollama is not published to the host (it has no authentication); the engine
 reaches it over the compose network. Pull a model into it with
 `docker compose exec ollama ollama pull qwen3:8b`. Sidecar images are pinned to
