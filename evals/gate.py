@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -74,6 +75,16 @@ class MetricCheck:
     observed: float | None  # None when the run did not produce this metric
     passed: bool
     detail: str
+
+    @property
+    def improved(self) -> bool:
+        """The run beat the bound by more than the tolerance band: on a
+        deterministic eval the floor (or ceiling) can be ratcheted to it."""
+        if self.observed is None:
+            return False
+        if self.direction == "floor":
+            return self.observed > self.threshold + self.tolerance
+        return self.observed < self.threshold - self.tolerance
 
     @property
     def effective_bound(self) -> float:
@@ -125,6 +136,12 @@ class GateReport:
             lines.append(f"{c.name:<26} {obs:>10} {bound:>18} {'PASS' if c.passed else 'FAIL':>8}")
             if not c.passed:
                 lines.append(f"    -> {c.detail}")
+        improved = [c.name for c in self.checks if c.improved]
+        if improved:
+            lines.append(
+                f"    improved beyond the bound: {', '.join(improved)} "
+                "- ratchet the baseline (--ratchet) so a later regression is caught"
+            )
         verdict = (
             "PASS"
             if self.metrics_ok
@@ -213,6 +230,56 @@ def evaluate_gate(observed: dict[str, float], baseline: dict) -> GateReport:
         checks=checks,
         metrics_ok=all(c.passed for c in checks),
     )
+
+
+def ratchet_baseline(path: Path, observed: dict[str, float], today: str) -> list[str]:
+    """Move bounds to ``observed`` where the run did better; never loosen.
+
+    For deterministic evals, where a floor below the observed value only hides
+    regressions. Rewrites ``path`` (keeping its other fields), stamps
+    ``recorded_at``, and returns the names of the metrics that moved.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    moved: list[str] = []
+    for name, spec in data["metrics"].items():
+        value = observed.get(name)
+        if value is None:
+            continue
+        value = round(value, 4)
+        if "floor" in spec and value > spec["floor"]:
+            spec["floor"] = value
+            moved.append(name)
+        elif "ceiling" in spec and value < spec["ceiling"]:
+            spec["ceiling"] = value
+            moved.append(name)
+    if moved:
+        data["recorded_at"] = today
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return moved
+
+
+def paired_bootstrap(
+    baseline: list[float],
+    candidate: list[float],
+    iterations: int = 2000,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    """Mean per-query difference (candidate - baseline) with a 95% bootstrap CI.
+
+    Queries are resampled as pairs, so the interval reflects how consistently
+    one method beats the other on the *same* queries — the right test for
+    comparing two rankers on one query set. An interval that excludes 0 is a
+    difference the sample supports; one that straddles 0 is not.
+    """
+    if len(baseline) != len(candidate) or not baseline:
+        raise ValueError("paired_bootstrap needs two equal-length, non-empty samples")
+    diffs = [c - b for b, c in zip(baseline, candidate, strict=True)]
+    rng = random.Random(seed)  # noqa: S311 - reproducible resampling, not crypto
+    n = len(diffs)
+    means = sorted(sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(iterations))
+    low = means[int(0.025 * iterations)]
+    high = means[min(iterations - 1, int(0.975 * iterations))]
+    return sum(diffs) / n, low, high
 
 
 def load_baseline(path: Path) -> dict:

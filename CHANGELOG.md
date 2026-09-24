@@ -78,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docker-compose` Ollama healthcheck uses `ollama list` instead of `curl`.
 
 ### Internal
+- **Retrieval gate floors pinned to observed values.** The deterministic BM25 gate's floors sat ~2 points below what it measures, so recall@10 could fall from 0.916 to 0.895 without failing. They now equal the observed values with a 0.001 tolerance. `--ratchet` (retrieval and pipeline-retrieval evals) raises floors after a passing run that beat them and never lowers them; the gate report names the metrics that improved.
+- **Paired bootstrap for method comparisons.** `retrieval_eval.py --compare A B` reports the mean per-query difference between two results files with a 95% paired-bootstrap CI (`gate.paired_bootstrap`); results files now record per-query reciprocal rank.
 - One LLM call path (`utils.llm.call_llm`) and one JSON parser (`parse_json_object`) replace five copies of budget/semaphore/usage/salvage logic.
 - Contradiction and corroboration gates run concurrently across sentences.
 - Removed dead code (`_build_uncited_sentence_request`, `run_with_otel_context`).

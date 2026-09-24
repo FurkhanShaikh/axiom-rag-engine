@@ -188,7 +188,13 @@ async def evaluate(
 
 
 def run(
-    limit: int, seed: int, pool: int, max_ranked: int, variant: str, gate_baseline: Path | None
+    limit: int,
+    seed: int,
+    pool: int,
+    max_ranked: int,
+    variant: str,
+    gate_baseline: Path | None,
+    ratchet: bool = False,
 ) -> int:
     corpus = reval.load_corpus()
     queries = reval.load_queries("dev")
@@ -235,7 +241,13 @@ def run(
         report = gate.evaluate_gate(_gate_metrics(summary), gate.load_baseline(gate_baseline))
         _echo()
         _echo(report.render())
-        return 1 if report.gating_failed else 0
+        if report.gating_failed:
+            return 1
+        if ratchet:
+            moved = gate.ratchet_baseline(
+                gate_baseline, _gate_metrics(summary), time.strftime("%Y-%m-%d")
+            )
+            _echo(f"Ratcheted {gate_baseline.name}: {', '.join(moved) or 'nothing to raise'}")
     return 0
 
 
@@ -254,9 +266,24 @@ def main() -> None:
         metavar="BASELINE",
         help=f"Fail (exit 1) on regression against a baseline. Defaults to {BASELINE_PATH.name}.",
     )
+    parser.add_argument(
+        "--ratchet",
+        action="store_true",
+        help="With --gate: raise the baseline's floors to this run's values where it did better.",
+    )
     args = parser.parse_args()
     baseline = Path(args.gate) if args.gate else None
-    sys.exit(run(args.limit, args.seed, args.pool, args.max_ranked, args.variant, baseline))
+    sys.exit(
+        run(
+            args.limit,
+            args.seed,
+            args.pool,
+            args.max_ranked,
+            args.variant,
+            baseline,
+            ratchet=args.ratchet,
+        )
+    )
 
 
 if __name__ == "__main__":

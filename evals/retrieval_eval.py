@@ -621,6 +621,7 @@ def run(
     rerank_depth: int = 30,
     rerank_base: str = "bm25",
     rerank_workers: int = 4,
+    ratchet: bool = False,
 ) -> int:
     corpus, queries = load_dataset(dataset, paraphrased=paraphrased)
     query_kind = "paraphrased" if paraphrased else "original"
@@ -710,6 +711,7 @@ def run(
                         "relevant": r.relevant,
                         "recall_at_10": r.recall[10],
                         "ndcg_at_10": r.ndcg_at_10,
+                        "rr": r.rr,
                         "first_hit_rank": r.first_hit_rank,
                     }
                     for r in results
@@ -740,7 +742,45 @@ def run(
         report = gate.evaluate_gate(_gate_metrics(summary), baseline)
         _echo()
         _echo(report.render())
-        return 1 if report.gating_failed else 0
+        if report.gating_failed:
+            return 1
+        if ratchet:
+            moved = gate.ratchet_baseline(
+                gate_baseline, _gate_metrics(summary), time.strftime("%Y-%m-%d")
+            )
+            _echo(f"Ratcheted {gate_baseline.name}: {', '.join(moved) or 'nothing to raise'}")
+    return 0
+
+
+# Per-query fields a --compare can test (names as written in the results files).
+_COMPARE_METRICS = ("recall_at_10", "ndcg_at_10", "rr")
+
+
+def compare(baseline_path: Path, candidate_path: Path) -> int:
+    """Paired bootstrap of two results files over the queries they share.
+
+    Point differences between methods on a few hundred queries (or 15) are
+    easy to over-read; resampling the shared queries as pairs gives each
+    difference a 95% interval.
+    """
+    runs = [json.loads(p.read_text(encoding="utf-8")) for p in (baseline_path, candidate_path)]
+    by_id = [{r["claim_id"]: r for r in run["records"]} for run in runs]
+    shared = sorted(set(by_id[0]) & set(by_id[1]))
+    if not shared:
+        _echo("The two runs share no queries.")
+        return 1
+    _echo(
+        f"{runs[1].get('method')} vs {runs[0].get('method')} on {len(shared)} shared queries "
+        "(difference = candidate - baseline, 95% paired-bootstrap CI):"
+    )
+    for metric in _COMPARE_METRICS:
+        if not all(metric in by_id[i][q] for i in (0, 1) for q in shared):
+            continue
+        base = [float(by_id[0][q][metric]) for q in shared]
+        cand = [float(by_id[1][q][metric]) for q in shared]
+        mean, low, high = gate.paired_bootstrap(base, cand)
+        verdict = "significant" if low > 0 or high < 0 else "not significant"
+        _echo(f"  {metric:<14} {mean:+.4f}  [{low:+.4f}, {high:+.4f}]  {verdict}")
     return 0
 
 
@@ -797,7 +837,21 @@ def main() -> None:
         metavar="BASELINE",
         help=f"Fail (exit 1) on regression against a baseline. Defaults to {BASELINE_PATH.name}.",
     )
+    parser.add_argument(
+        "--ratchet",
+        action="store_true",
+        help="With --gate: raise the baseline's floors to this run's values where it did "
+        "better (deterministic evals only; never loosens).",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BASELINE_RESULTS", "CANDIDATE_RESULTS"),
+        help="Paired-bootstrap two results files instead of running an eval.",
+    )
     args = parser.parse_args()
+    if args.compare:
+        sys.exit(compare(Path(args.compare[0]), Path(args.compare[1])))
     baseline = Path(args.gate) if args.gate else None
     sys.exit(
         run(
@@ -812,6 +866,7 @@ def main() -> None:
             rerank_depth=args.rerank_depth,
             rerank_base=args.rerank_base,
             rerank_workers=args.rerank_workers,
+            ratchet=args.ratchet,
         )
     )
 
