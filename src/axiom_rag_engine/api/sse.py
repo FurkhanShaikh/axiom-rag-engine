@@ -397,8 +397,12 @@ async def stream_pipeline(
 
     # -- post-complete hook (cache, metrics, audit) before terminal frame --
     if on_complete is not None:
-        with contextlib.suppress(Exception):
+        try:
             await on_complete(response, accumulated)
+        except Exception:
+            # Housekeeping (cache, metrics, audit) must not break the stream,
+            # but its failures must be visible.
+            logger.exception("on_complete hook failed for request %s", payload.request_id)
 
     # -- complete (terminal) --
     yield _sse("complete", {"type": "complete", "response": response.model_dump()}, _next_id())

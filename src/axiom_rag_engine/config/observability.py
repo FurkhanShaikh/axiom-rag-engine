@@ -44,8 +44,9 @@ REQUESTS_BY_STATUS = Counter(
 )
 TIER_ASSIGNMENTS = Counter(
     "axiom_tier_assignments_total",
-    "Verification tier assignment count",
-    ["tier"],
+    "Verification tiers assigned to cited sentences (claims), matching the response's "
+    "tier_breakdown; label separates e.g. tier 3 model_assisted from unverified",
+    ["tier", "label"],
 )
 SEMANTIC_DEGRADATIONS = Counter(
     "axiom_semantic_degradations_total",
