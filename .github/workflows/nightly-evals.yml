@@ -30,7 +30,15 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           if [ -z "$OPENAI_API_KEY" ]; then
-            echo "No OPENAI_API_KEY secret configured — skipping keyed evals."
+            # Visible, not silent: the production verifier's quality is not
+            # being measured. Not a failure, so the nightly does not go red
+            # every day on repos without the secret.
+            echo "::warning title=Semantic verifier not measured::No OPENAI_API_KEY secret configured - the keyed semantic-verifier eval was skipped, so verifier quality is unmeasured (see BENCHMARKS.md, Recording the baseline)."
+            {
+              echo "### Semantic verifier eval skipped"
+              echo "No \`OPENAI_API_KEY\` secret is configured, so the production verifier was not measured tonight."
+              echo "Add the secret to run it; see BENCHMARKS.md, *Recording the baseline*."
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"

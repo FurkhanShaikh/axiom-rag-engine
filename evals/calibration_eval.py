@@ -45,6 +45,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from gate import wilson_interval
+
 EVALS_DIR = Path(__file__).resolve().parent
 ASQA_PATH = EVALS_DIR / "data" / "asqa" / "dev.jsonl"
 SEARCH_CACHE_PATH = EVALS_DIR / "data" / "calibration_search_cache.json"
@@ -86,17 +88,6 @@ def str_em(text: str, qa_pairs: list[dict[str, Any]]) -> float:
         if any(a and f" {a} " in haystack for a in answers):
             hits += 1
     return hits / len(qa_pairs)
-
-
-def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """95% Wilson score interval for a binomial proportion."""
-    if n == 0:
-        return 0.0, 1.0
-    p = successes / n
-    denom = 1 + z * z / n
-    centre = (p + z * z / (2 * n)) / denom
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return max(0.0, centre - half), min(1.0, centre + half)
 
 
 def bucket_of(sentence: dict[str, Any]) -> str:
