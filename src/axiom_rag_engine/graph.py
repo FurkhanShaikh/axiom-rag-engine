@@ -15,6 +15,7 @@ DAG topology:
 from __future__ import annotations
 
 import inspect
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, Literal, cast
@@ -37,6 +38,8 @@ from axiom_rag_engine.state import (
 )
 from axiom_rag_engine.utils.audit import make_audit_event
 
+logger = logging.getLogger("axiom_rag_engine.graph")
+
 # ---------------------------------------------------------------------------
 # Conditional edge — the verification loop (LLD §4)
 # ---------------------------------------------------------------------------
@@ -50,6 +53,7 @@ def route_post_verification(
     for a rewrite pass, or goes all the way back to retriever for fresh sources.
 
     Routing rules (architecture §5, LLD §4):
+      0. If the run halted (a later pass failed) → END with the best pass.
       1. If is_answerable is False → END (escape hatch or insufficient data).
       2. If pending_rewrite_count == 0 → END (all citations verified).
       3. If fewer than max_rewrite_loops rewrites have run in this retrieval
@@ -58,6 +62,10 @@ def route_post_verification(
          (re-retrieve with fresh sources).
       5. Otherwise → END (exhaustion).
     """
+    # Rule 0: a later pass failed; the best verified pass is already in place.
+    if state.get("halt_reason"):
+        return "__end__"
+
     # Rule 1: escape hatch
     if not state.get("is_answerable", True):
         return "__end__"
@@ -146,6 +154,92 @@ async def retriever_with_retry(state: GraphState, config: RunnableConfig | None 
 
 
 # ---------------------------------------------------------------------------
+# Fail-soft after the first verified pass
+# ---------------------------------------------------------------------------
+# Once one pass has been verified, every later node (rewrite, re-retrieval,
+# re-verification) is refinement: its failure must not cost the caller the
+# answer already in hand. A failing later node — provider error, exhausted LLM
+# budget, all searches down, or the synthesizer giving up — ends the run with
+# the best verified pass instead of failing the request. Before the first
+# verified pass there is nothing to fall back to, so errors still propagate.
+
+
+def _has_verified_pass(state: GraphState) -> bool:
+    return state.get("best_pass_rank") is not None
+
+
+def _halt_with_best_pass(
+    state: GraphState, node: str, reason: str, detail: dict[str, Any]
+) -> dict[str, Any]:
+    """State update that ends the run and returns the best verified pass."""
+    best: list[dict[str, Any]] = list(state.get("best_final_sentences") or [])
+    logger.warning(
+        "Pipeline halted at %s (%s) for request %s; returning the best verified pass.",
+        node,
+        reason,
+        state.get("request_id"),
+    )
+    return {
+        "halt_reason": reason,
+        "is_answerable": bool(best),
+        "final_sentences": best,
+        "pending_rewrite_count": 0,
+        "audit_trail": [
+            make_audit_event(
+                node,
+                "pipeline_halted_best_pass_returned",
+                {
+                    "reason": reason,
+                    "best_pass_rank": state.get("best_pass_rank"),
+                    "loop_count": state.get("loop_count", 0),
+                    "retrieval_retry_count": state.get("retrieval_retry_count", 0),
+                    **detail,
+                },
+            )
+        ],
+    }
+
+
+def _fail_soft(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a node so a failure after the first verified pass halts the run
+    with that pass rather than failing the whole request."""
+
+    async def _wrapper(state: GraphState, config: RunnableConfig) -> dict:
+        try:
+            result = cast(dict[str, Any], await _call_node(fn, state, config))
+        except Exception as exc:
+            if not _has_verified_pass(state):
+                raise
+            # Error type only: provider messages can carry account details.
+            return _halt_with_best_pass(
+                state, name, "node_error", {"error_type": type(exc).__name__}
+            )
+        if (
+            name == "synthesizer"
+            and _has_verified_pass(state)
+            and not result.get("is_answerable", True)
+        ):
+            # A later pass declaring the query unanswerable is a failed repair,
+            # not new evidence: an earlier pass already answered from sources.
+            halt = _halt_with_best_pass(state, name, "synthesizer_gave_up", {})
+            halt["audit_trail"] = [*result.get("audit_trail", []), *halt["audit_trail"]]
+            return halt
+        return result
+
+    _wrapper.__name__ = fn.__name__
+    return _wrapper
+
+
+def _unless_halted(next_node: str) -> Callable[[GraphState], str]:
+    """Edge router: continue to ``next_node`` unless the run halted."""
+
+    def _route(state: GraphState) -> str:
+        return END if state.get("halt_reason") else next_node
+
+    return _route
+
+
+# ---------------------------------------------------------------------------
 # Node duration instrumentation
 # ---------------------------------------------------------------------------
 
@@ -179,21 +273,28 @@ def build_axiom_graph() -> CompiledStateGraph:
     """
     workflow = StateGraph(GraphState)
 
-    # Add nodes (instrumented with per-node duration metrics)
+    # Add nodes (instrumented with per-node duration metrics). Every node that
+    # can run after the first verified pass is fail-soft (see _fail_soft).
     workflow.add_node("retriever", _timed_node("retriever", retriever_node))
-    workflow.add_node("re_retriever", _timed_node("re_retriever", retriever_with_retry))
-    workflow.add_node("scorer", _timed_node("scorer", scorer_node))
-    workflow.add_node("ranker", _timed_node("ranker", ranker_node))
-    workflow.add_node("synthesizer", _timed_node("synthesizer", synthesizer_node))
-    workflow.add_node("verifier", _timed_node("verifier", verification_node))
+    for name, fn in (
+        ("re_retriever", retriever_with_retry),
+        ("scorer", scorer_node),
+        ("ranker", ranker_node),
+        ("synthesizer", synthesizer_node),
+        ("verifier", verification_node),
+    ):
+        workflow.add_node(name, _timed_node(name, _fail_soft(name, fn)))
 
-    # Linear edges — full pipeline
+    # Linear edges — full pipeline; a halted run ends at the node that halted.
     workflow.set_entry_point("retriever")
     workflow.add_edge("retriever", "scorer")
-    workflow.add_edge("re_retriever", "scorer")
-    workflow.add_edge("scorer", "ranker")
-    workflow.add_edge("ranker", "synthesizer")
-    workflow.add_edge("synthesizer", "verifier")
+    for source, target in (
+        ("re_retriever", "scorer"),
+        ("scorer", "ranker"),
+        ("ranker", "synthesizer"),
+        ("synthesizer", "verifier"),
+    ):
+        workflow.add_conditional_edges(source, _unless_halted(target), {target: target, END: END})
 
     # Conditional edge — the verification loop + re-retrieve
     workflow.add_conditional_edges(

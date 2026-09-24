@@ -84,6 +84,10 @@ class GraphState(TypedDict):
     best_final_sentences: list[dict]
     # Sort key of best_final_sentences (lower is better); None before any pass.
     best_pass_rank: list[int] | None
+    # Set when a node failed (or the synthesizer gave up) after a verified pass
+    # already existed: the run ends and returns best_final_sentences instead of
+    # failing the request. None while the run is healthy.
+    halt_reason: str | None
     # operator.add — every node appends its own audit events; the audit
     # trail is never overwritten, preserving causality across re-entries.
     audit_trail: Annotated[Sequence[dict], operator.add]
@@ -122,6 +126,7 @@ def make_initial_state(
         final_sentences=[],
         best_final_sentences=[],
         best_pass_rank=None,
+        halt_reason=None,
         audit_trail=[],
     )
 
