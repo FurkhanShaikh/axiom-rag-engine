@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -135,6 +136,7 @@ def cache_key(
     app_config: dict[str, Any],
     pipeline_config: dict[str, Any],
     models_config: dict[str, Any],
+    corpus_version: int | None = None,
 ) -> str:
     """
     SHA-256 of the request fields that shape the response body, namespaced by
@@ -144,6 +146,10 @@ def cache_key(
     Namespacing prevents cross-tenant cache poisoning: two callers with different
     API keys cannot serve each other's cached results even when all other fields
     match. The full 64-hex digest keeps collisions out of reach at any scale.
+
+    ``corpus_version`` (when a corpus store is configured) changes on every
+    ingest and delete, so answers built from a deleted or replaced document are
+    never served from cache.
     """
     key_namespace = hashlib.sha256((api_key or "anonymous").encode()).hexdigest()
     raw = json.dumps(
@@ -154,6 +160,7 @@ def cache_key(
             "pipeline": pipeline_config,
             "app": app_config,
             "include_debug": payload.include_debug,
+            "corpus_version": corpus_version,
         },
         sort_keys=True,
     )
@@ -179,6 +186,28 @@ def _hydrate_cached_response(request_id: str, cached: dict[str, Any]) -> AxiomRe
     data = copy.deepcopy(cached)
     data["usage"] = None
     return AxiomResponse.model_validate({"request_id": request_id, **data})
+
+
+async def _request_cache_key(
+    services: AppServices,
+    payload: AxiomRequest,
+    api_key: str | None,
+    initial_state: GraphState,
+) -> str:
+    """The cache key for this request under its effective configuration."""
+    corpus_version = (
+        await asyncio.to_thread(services.corpus_store.version)
+        if services.corpus_store is not None
+        else None
+    )
+    return cache_key(
+        payload,
+        api_key,
+        initial_state["app_config"],
+        initial_state["pipeline_config"],
+        initial_state["models_config"],
+        corpus_version=corpus_version,
+    )
 
 
 async def _get_cached(services: AppServices, key: str, request_id: str) -> AxiomResponse | None:
@@ -220,13 +249,7 @@ async def synthesize(
     tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 
-    key = cache_key(
-        payload,
-        _api_key,
-        initial_state["app_config"],
-        initial_state["pipeline_config"],
-        initial_state["models_config"],
-    )
+    key = await _request_cache_key(services, payload, _api_key, initial_state)
     cached = await _get_cached(services, key, payload.request_id)
     if cached is not None:
         CACHE_HITS.inc()
@@ -296,13 +319,7 @@ async def synthesize_stream(
     tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 
-    key = cache_key(
-        payload,
-        _api_key,
-        initial_state["app_config"],
-        initial_state["pipeline_config"],
-        initial_state["models_config"],
-    )
+    key = await _request_cache_key(services, payload, _api_key, initial_state)
     cached = await _get_cached(services, key, payload.request_id)
     if cached is not None:
         CACHE_HITS.inc()

@@ -149,7 +149,14 @@ _MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)",
         "CREATE INDEX IF NOT EXISTS idx_docs_model ON documents(embedding_model)",
     ),
+    # v2 — a corpus version, bumped on every change, so response caches keyed on
+    # it stop serving answers built from deleted or replaced documents.
+    (
+        "CREATE TABLE IF NOT EXISTS corpus_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        "INSERT OR IGNORE INTO corpus_meta (key, value) VALUES ('version', 0)",
+    ),
 )
+_BUMP_VERSION = "UPDATE corpus_meta SET value = value + 1 WHERE key = 'version'"
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # How long a connection waits on another writer's lock before failing with
@@ -296,15 +303,27 @@ class CorpusStore:
                     for idx, (text, vec) in enumerate(chunks)
                 ],
             )
+            conn.execute(_BUMP_VERSION)
         return meta
 
     def delete_document(self, doc_id: str) -> bool:
         """Delete a document and its chunks. Returns True if it existed."""
         with closing(self._connect()) as conn, conn:
             cur = conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
-            return cur.rowcount > 0
+            if cur.rowcount == 0:
+                return False
+            conn.execute(_BUMP_VERSION)
+            return True
 
     # -- Reads -------------------------------------------------------------
+
+    def version(self) -> int:
+        """Monotonic counter bumped by every ingest and delete (in the same
+        transaction), for invalidating caches derived from the corpus."""
+        with closing(self._connect()) as conn:
+            return int(
+                conn.execute("SELECT value FROM corpus_meta WHERE key = 'version'").fetchone()[0]
+            )
 
     def get_document(self, doc_id: str) -> DocumentMeta | None:
         with closing(self._connect()) as conn:
