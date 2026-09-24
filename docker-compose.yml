@@ -44,7 +44,7 @@ services:
       - ollama_models:/home/ollama
 
   ollama:
-    image: ollama/ollama:0.9.0
+    image: ollama/ollama:0.34.2
     container_name: axiom-ollama
     # Run as a non-root numeric UID/GID (no user account required in the image).
     # HOME and OLLAMA_MODELS point at the volume, which ollama-init made
