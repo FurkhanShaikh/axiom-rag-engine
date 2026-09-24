@@ -267,6 +267,24 @@ The **pool=10, production** row is a per-PR gate (`tasks.py evals gate`). The
 run is deterministic, so its floors are pinned to the observed values: a single
 claim changing its outcome fails CI.
 
+### Corpus search latency (2026-09-24)
+
+`CorpusStore.search` over 10,000 synthetic 768-dim chunks, k=50, 30 queries, on
+the 4-core CI-class container these numbers were taken on
+(`python evals/corpus_eval.py --bench-search 10000`). Speed only — the vectors
+are random, so this says nothing about retrieval quality.
+
+| Search path | mean | p95 |
+|---|---|---|
+| Uncached, pure Python (every query re-reads and decodes every vector — how search worked before) | 739 ms | 782 ms |
+| Cached vectors, pure Python | 331 ms | 344 ms |
+| Cached vectors, numpy (`vector` extra) | **1.8 ms** | **2.0 ms** |
+
+Caching the decoded vectors per corpus version halves the cost; vectorised
+scoring removes almost all of the rest. Brute force stays linear in corpus
+size, so pure Python is still slow at this scale — install the `vector` extra
+(the Docker image does) for any corpus beyond a few thousand chunks.
+
 ### Query expansion — live web (2026-09-22)
 
 Do the retriever's extra searches earn their cost? `evals/query_expansion_eval.py`

@@ -57,6 +57,8 @@ dependencies = [
 
 [project.optional-dependencies]
 redis = ["redis>=5.0"]
+# Vectorised corpus search (~400x faster at 10k chunks; see BENCHMARKS.md).
+vector = ["numpy>=1.26"]
 
 [project.urls]
 Homepage = "https://github.com/FurkhanShaikh/axiom-rag-engine"

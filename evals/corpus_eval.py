@@ -15,6 +15,11 @@ Needs a live LiteLLM embedding model, e.g.:
 
     uv run python evals/corpus_eval.py --dataset scifact --model ollama/nomic-embed-text --limit 100
 
+``--bench-search N`` instead times ``CorpusStore.search`` over N synthetic chunks
+(no model needed): uncached pure Python (every query re-reads and decodes every
+vector, as search did before the vector cache), cached pure Python, and cached
+numpy.
+
 Recall is measured at the *document* level: a document is chunked on ingest, and a
 retrieved chunk is mapped back to its document before scoring.
 """
@@ -204,6 +209,65 @@ def run(
     return 0
 
 
+def _unit(vec: list[float]) -> list[float]:
+    norm = sum(x * x for x in vec) ** 0.5 or 1.0
+    return [x / norm for x in vec]
+
+
+def bench_search(
+    n_chunks: int, dim: int = 768, queries: int = 30, k: int = 50, seed: int = 13
+) -> dict[str, dict[str, float]]:
+    """Time ``CorpusStore.search`` over ``n_chunks`` random unit vectors.
+
+    Returns mean and p95 milliseconds per query for each mode. The vectors are
+    synthetic, so this measures speed only, not retrieval quality.
+    """
+    import statistics
+    import time
+
+    rng = random.Random(seed)  # noqa: S311 - benchmark data, not crypto
+    per_doc = 100
+    results: dict[str, dict[str, float]] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "bench.db"
+        writer = CorpusStore(path)
+        for d in range(0, n_chunks, per_doc):
+            size = min(per_doc, n_chunks - d)
+            writer.add_document(
+                doc_id=f"d{d}",
+                title=f"doc {d}",
+                source="bench",
+                embedding_model="bench",
+                chunks=[
+                    (f"chunk {d + i}", _unit([rng.gauss(0, 1) for _ in range(dim)]))
+                    for i in range(size)
+                ],
+            )
+        probes = [_unit([rng.gauss(0, 1) for _ in range(dim)]) for _ in range(queries)]
+
+        modes = {
+            "uncached, pure Python": (False, True),
+            "cached, pure Python": (False, False),
+            "cached, numpy": (True, False),
+        }
+        for label, (use_numpy, cold) in modes.items():
+            store = CorpusStore(path, use_numpy=use_numpy)
+            store.search(probes[0], embedding_model="bench", k=k)  # build the cache
+            timings = []
+            for probe in probes:
+                if cold:
+                    store._indexes.clear()
+                start = time.perf_counter()
+                store.search(probe, embedding_model="bench", k=k)
+                timings.append((time.perf_counter() - start) * 1000)
+            timings.sort()
+            results[label] = {
+                "mean_ms": round(statistics.fmean(timings), 2),
+                "p95_ms": round(timings[int(0.95 * (len(timings) - 1))], 2),
+            }
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", default="scifact", help="scifact | arguana | <beir name>")
@@ -228,7 +292,20 @@ def main() -> None:
         action="store_true",
         help=f"Compare against the committed baseline ({BASELINE_PATH.name}) and exit nonzero on regression",
     )
+    parser.add_argument(
+        "--bench-search",
+        type=int,
+        metavar="N",
+        default=0,
+        help="Time CorpusStore.search over N synthetic chunks instead (no model needed)",
+    )
     args = parser.parse_args()
+
+    if args.bench_search:
+        _echo(f"CorpusStore.search over {args.bench_search} chunks (dim 768, k=50):")
+        for label, row in bench_search(args.bench_search).items():
+            _echo(f"  {label:<24} mean {row['mean_ms']:>8.2f} ms   p95 {row['p95_ms']:>8.2f} ms")
+        raise SystemExit(0)
 
     baseline = BASELINE_PATH if args.gate else None
     if args.gate and not BASELINE_PATH.exists():

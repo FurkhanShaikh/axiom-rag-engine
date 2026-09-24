@@ -29,6 +29,10 @@ Or with [uv](https://docs.astral.sh/uv/):
 uv add axiom-rag-engine
 ```
 
+Optional extras: `redis` (shared cache, rate limits and spend across replicas)
+and `vector` (numpy-scored corpus search, ~400× faster at 10k chunks), e.g.
+`pip install "axiom-rag-engine[redis,vector]"`. The Docker image includes both.
+
 ## Quick start
 
 ### From PyPI

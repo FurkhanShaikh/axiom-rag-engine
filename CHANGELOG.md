@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — corpus search speed (COR-5)
+- **Corpus search no longer re-reads every embedding per query.** Decoded vectors are cached per embedding model until the corpus version changes (any ingest or delete, from any process), so a query reads only the version counter and its top-k rows. With the new `vector` extra (numpy) scoring is vectorised: at 10k chunks a search takes 1.8 ms instead of 739 ms (`corpus_eval.py --bench-search`; BENCHMARKS.md). Without numpy the pure-Python path is used, about 2× faster than before.
+
 ### Changed — supply chain and compose (DEP-2)
 - **docker-compose pins its images** (`ollama/ollama:0.9.0`, `redis:7.4-alpine`, `prom/prometheus:v3.4.1`, `grafana/grafana:12.0.2`) instead of `:latest`; Dependabot now updates Docker and compose images.
 - **Ollama's port is no longer published.** It has no authentication and the engine reaches it over the compose network; pull models with `docker compose exec ollama ollama pull <model>`, or uncomment the localhost-only port mapping.
