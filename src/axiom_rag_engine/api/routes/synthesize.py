@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -233,8 +234,51 @@ def _record_outcome_metrics(response: AxiomResponse, graph_result: dict[str, Any
 # ---------------------------------------------------------------------------
 
 
+class ClientDisconnectedError(Exception):
+    """The client went away before the pipeline finished."""
+
+
+# How often a running request checks whether its client is still connected.
+_DISCONNECT_POLL_SECONDS = 0.5
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    while not await request.is_disconnected():
+        await asyncio.sleep(_DISCONNECT_POLL_SECONDS)
+
+
+async def run_unless_disconnected(request: Request, awaitable: Any) -> Any:
+    """Await ``awaitable``, cancelling it if the client disconnects first.
+
+    Starlette does not cancel a handler when its client goes away, so without
+    this a JSON request kept running — and spending LLM budget — for a response
+    nobody would read. (The SSE endpoint gets the same effect from generator
+    teardown.) The task inherits this context, so the per-request LLM budget
+    and usage counters are shared.
+
+    Raises:
+        ClientDisconnectedError: the client disconnected; the work was cancelled.
+    """
+    task = asyncio.ensure_future(awaitable)
+    watcher = asyncio.ensure_future(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        task.cancel()
+        watcher.cancel()
+        raise
+    watcher.cancel()
+    if task in done:
+        return task.result()
+    task.cancel()
+    with contextlib.suppress(Exception, asyncio.CancelledError):
+        await task
+    raise ClientDisconnectedError
+
+
 async def synthesize(
     services: Services,
+    request: Request,
     payload: AxiomRequest,
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
@@ -243,7 +287,9 @@ async def synthesize(
     validated AxiomResponse with tier breakdown and confidence score.
 
     Pipeline errors return HTTP 500 and budget exhaustion HTTP 429; successful,
-    partial, and unanswerable results return HTTP 200.
+    partial, and unanswerable results return HTTP 200. If the client
+    disconnects first, the pipeline is cancelled and no further LLM budget is
+    spent.
     """
     request_id_ctx.set(payload.request_id)
     tag_current_span(payload.request_id)
@@ -264,9 +310,14 @@ async def synthesize(
 
     try:
         with PIPELINE_DURATION.time():
-            graph_result = await services.engine.ainvoke(
-                initial_state, config=services.run_config()
+            graph_result = await run_unless_disconnected(
+                request, services.engine.ainvoke(initial_state, config=services.run_config())
             )
+    except ClientDisconnectedError:
+        REQUESTS_BY_STATUS.labels(status="cancelled").inc()
+        logger.info("Client disconnected; cancelled request %s", payload.request_id)
+        # 499 (client closed request): nobody reads it, but logs show why.
+        return Response(status_code=499)
     except LLMBudgetExceededError as exc:
         REQUESTS_BY_STATUS.labels(status="error").inc()
         error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
