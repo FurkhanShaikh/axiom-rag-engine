@@ -23,6 +23,7 @@ from axiom_rag_engine.config.observability import (
     PIPELINE_DURATION,
     REQUESTS_BY_STATUS,
     TIER_ASSIGNMENTS,
+    tag_current_span,
 )
 from axiom_rag_engine.config.settings import Settings
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
@@ -216,6 +217,7 @@ async def synthesize(
     partial, and unanswerable results return HTTP 200.
     """
     request_id_ctx.set(payload.request_id)
+    tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 
     key = cache_key(
@@ -291,6 +293,7 @@ async def synthesize_stream(
     that stream to completion.
     """
     request_id_ctx.set(payload.request_id)
+    tag_current_span(payload.request_id)
     initial_state = _initial_state(payload, services)
 
     key = cache_key(

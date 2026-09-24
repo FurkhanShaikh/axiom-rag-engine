@@ -42,7 +42,11 @@ from axiom_rag_engine.api.rate_limit import (  # noqa: F401 — re-exported
 from axiom_rag_engine.api.routes import audits, documents, ops, synthesize
 from axiom_rag_engine.bootstrap import VERSION, build_services
 from axiom_rag_engine.config.logging import configure_logging, request_id_ctx
-from axiom_rag_engine.config.observability import setup_prometheus, setup_tracing
+from axiom_rag_engine.config.observability import (
+    instrument_app,
+    setup_prometheus,
+    setup_tracing,
+)
 from axiom_rag_engine.config.settings import Settings, get_settings
 from axiom_rag_engine.marshalling import (  # noqa: F401 — re-exported
     make_error_response,
@@ -70,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings, search_backend=getattr(app.state, "search_backend_override", None)
     )
     app.state.services = services
-    setup_tracing(app, "axiom-rag-engine", VERSION)
+    setup_tracing("axiom-rag-engine", VERSION)
     try:
         yield
     finally:
@@ -156,6 +160,7 @@ def create_app(
         make_body_size_middleware(config.max_body_bytes, config.max_document_bytes)
     )
     setup_prometheus(app)
+    instrument_app(app)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(ops.router)
