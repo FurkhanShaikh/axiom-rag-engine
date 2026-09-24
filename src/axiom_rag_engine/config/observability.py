@@ -85,6 +85,61 @@ LLM_COST_USD_TOTAL = Counter(
     ["model"],
 )
 
+# ── Operational metrics (OBS-3) ─────────────────────────────────────────
+# Labels are bounded: fixed enums, backend class names, or safe_model_label.
+
+REWRITE_PASSES = Counter(
+    "axiom_rewrite_passes_total",
+    "Synthesis rewrite passes started after a verification pass left failures",
+)
+RE_RETRIEVALS = Counter(
+    "axiom_re_retrievals_total",
+    "Extra retrieval rounds started after a round's rewrites were exhausted",
+)
+PIPELINE_HALTS = Counter(
+    "axiom_pipeline_halts_total",
+    "Runs stopped early that returned their best verified pass, by reason",
+    ["reason"],
+)
+LLM_CALLS_PER_REQUEST = Histogram(
+    "axiom_llm_calls_per_request",
+    "LLM calls made by one completed request",
+    buckets=[1, 2, 4, 8, 16, 32, 64],
+)
+LLM_BUDGET_EXHAUSTED = Counter(
+    "axiom_llm_budget_exhausted_total",
+    "Per-request LLM budget exhaustions, by which cap was hit",
+    ["cap"],
+)
+SYNTHESIZER_PARSE_FAILURES = Counter(
+    "axiom_synthesizer_parse_failures_total",
+    "Synthesizer responses that could not be parsed (each triggers a corrective retry)",
+)
+SEARCH_FAILURES = Counter(
+    "axiom_search_failures_total",
+    "Search calls that failed, by backend",
+    ["backend"],
+)
+SOURCES_BY_CONTENT_MODE = Counter(
+    "axiom_sources_by_content_mode_total",
+    "Retrieved documents by verification text: full page (raw) or search snippet",
+    ["mode"],
+)
+RATE_LIMIT_REJECTIONS = Counter(
+    "axiom_rate_limit_rejections_total",
+    "Requests rejected with 429 by the rate limiter",
+)
+CACHE_ERRORS = Counter(
+    "axiom_cache_errors_total",
+    "Response-cache backend errors (each degrades to a miss or a skipped write)",
+    ["op"],
+)
+EMBEDDING_INPUTS = Counter(
+    "axiom_embedding_inputs_total",
+    "Texts sent for embedding, by model",
+    ["model"],
+)
+
 _prometheus_initialized = False
 
 

@@ -18,6 +18,8 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from cachetools import TTLCache
 
+from axiom_rag_engine.config.observability import CACHE_ERRORS
+
 try:
     from redis.exceptions import RedisError as _RedisError
 except ImportError:  # redis is optional
@@ -130,6 +132,7 @@ class RedisCacheBackend:
                     return cast(dict[str, Any], loaded)
                 logger.warning("Redis GET returned a non-dict payload for key %s", key)
         except (RedisError, OSError, json.JSONDecodeError) as exc:
+            CACHE_ERRORS.labels(op="get").inc()
             logger.warning("Redis GET failed for key %s: %s", key, exc)
         return None
 
@@ -137,6 +140,7 @@ class RedisCacheBackend:
         try:
             await self._redis.setex(self._prefixed(key), self.ttl, json.dumps(value))
         except (RedisError, OSError, TypeError) as exc:
+            CACHE_ERRORS.labels(op="set").inc()
             logger.warning("Redis SET failed for key %s: %s", key, exc)
 
     async def clear(self) -> None:
@@ -152,12 +156,14 @@ class RedisCacheBackend:
                 if cursor == 0:
                     break
         except (RedisError, OSError) as exc:
+            CACHE_ERRORS.labels(op="clear").inc()
             logger.warning("Redis CLEAR failed: %s", exc)
 
     async def ping(self) -> bool:
         try:
             return bool(await self._redis.ping())
         except Exception as exc:  # any failure means "not reachable" to a probe
+            CACHE_ERRORS.labels(op="ping").inc()
             logger.warning("Redis PING failed: %s", exc)
             return False
 

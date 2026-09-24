@@ -85,6 +85,9 @@ def consume_llm_budget(node: str) -> None:
     if budget is None:
         return
     if budget["remaining"] <= 0:
+        from axiom_rag_engine.config.observability import LLM_BUDGET_EXHAUSTED
+
+        LLM_BUDGET_EXHAUSTED.labels(cap="calls").inc()
         raise LLMBudgetExceededError(
             f"LLM call budget exhausted before {node} could issue its call."
         )
@@ -170,6 +173,9 @@ def record_llm_usage(usage: Any, node: str, model: str | None = None) -> None:
 
     token_cap: int = int(budget.get("token_cap", 0) or 0)
     if token_cap > 0 and budget["tokens_used"] > token_cap:
+        from axiom_rag_engine.config.observability import LLM_BUDGET_EXHAUSTED
+
+        LLM_BUDGET_EXHAUSTED.labels(cap="tokens").inc()
         raise LLMBudgetExceededError(
             f"Token budget exceeded after {node} call: "
             f"{budget['tokens_used']} tokens used (cap {token_cap})."
@@ -488,9 +494,14 @@ async def call_embedding(node: str, model: str, kwargs: dict[str, Any]) -> Any:
     """
     import litellm
 
-    from axiom_rag_engine.config.observability import LLM_CALL_DURATION, safe_model_label
+    from axiom_rag_engine.config.observability import (
+        EMBEDDING_INPUTS,
+        LLM_CALL_DURATION,
+        safe_model_label,
+    )
 
     consume_llm_budget(node)
+    EMBEDDING_INPUTS.labels(model=safe_model_label(model)).inc(len(kwargs.get("input") or []))
     start = time.monotonic()
     response = await _with_retry(node, model, lambda: litellm.aembedding(**kwargs))
     LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(
@@ -505,9 +516,14 @@ def call_embedding_sync(node: str, model: str, kwargs: dict[str, Any]) -> Any:
     copies the request context, so the request budget still applies)."""
     import litellm
 
-    from axiom_rag_engine.config.observability import LLM_CALL_DURATION, safe_model_label
+    from axiom_rag_engine.config.observability import (
+        EMBEDDING_INPUTS,
+        LLM_CALL_DURATION,
+        safe_model_label,
+    )
 
     consume_llm_budget(node)
+    EMBEDDING_INPUTS.labels(model=safe_model_label(model)).inc(len(kwargs.get("input") or []))
     start = time.monotonic()
     response = _with_retry_sync(node, model, lambda: litellm.embedding(**kwargs))
     LLM_CALL_DURATION.labels(node=node, model=safe_model_label(model)).observe(

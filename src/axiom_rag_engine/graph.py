@@ -25,7 +25,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from axiom_rag_engine.config.observability import NODE_DURATION
+from axiom_rag_engine.config.observability import NODE_DURATION, RE_RETRIEVALS, REWRITE_PASSES
 from axiom_rag_engine.nodes.ranker import ranker_node
 from axiom_rag_engine.nodes.retriever import retriever_node
 from axiom_rag_engine.nodes.scorer import scorer_node
@@ -77,11 +77,13 @@ def route_post_verification(
 
     # Rule 3: rewrite loop
     if rewrites_remaining(state, state.get("loop_count", 0)):
+        REWRITE_PASSES.inc()
         return "synthesizer"
 
     # Rule 4: re-retrieve if rewrites exhausted but retries available
     _, max_retries = loop_limits(state)
     if state.get("retrieval_retry_count", 0) < max_retries:
+        RE_RETRIEVALS.inc()
         return "re_retriever"
 
     # Rule 5: exhaustion

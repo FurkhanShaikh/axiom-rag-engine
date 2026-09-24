@@ -379,6 +379,13 @@ the log stream into your existing aggregator.
 per-node and per-model LLM latency histograms, **per-model token + USD cost
 counters** (`axiom_llm_tokens_total`, `axiom_llm_cost_usd_total`), tier
 assignment rates, cache hit ratio, and verification-degradation counters.
+Operational counters cover the repair loop (`axiom_rewrite_passes_total`,
+`axiom_re_retrievals_total`, `axiom_pipeline_halts_total{reason}`,
+`axiom_llm_calls_per_request`), failures (`axiom_llm_budget_exhausted_total{cap}`,
+`axiom_synthesizer_parse_failures_total`, `axiom_search_failures_total{backend}`,
+`axiom_cache_errors_total{op}`, `axiom_rate_limit_rejections_total`), and inputs
+(`axiom_sources_by_content_mode_total{mode}` — snippet-only sources verify
+against a summary — and `axiom_embedding_inputs_total{model}`).
 
 A ready-to-import Grafana dashboard lives at
 [`deploy/grafana/axiom-engine.json`](deploy/grafana/axiom-engine.json). The

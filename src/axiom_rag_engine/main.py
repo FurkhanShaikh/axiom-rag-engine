@@ -27,7 +27,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: F401 — HTTPException re-exported
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -43,6 +43,7 @@ from axiom_rag_engine.api.routes import audits, documents, ops, synthesize
 from axiom_rag_engine.bootstrap import VERSION, build_services
 from axiom_rag_engine.config.logging import configure_logging, request_id_ctx
 from axiom_rag_engine.config.observability import (
+    RATE_LIMIT_REJECTIONS,
     instrument_app,
     setup_prometheus,
     setup_tracing,
@@ -89,6 +90,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     logger.exception("Unhandled exception for request %s", request_id)
     error_response = make_error_response(request_id, exc)
     return JSONResponse(status_code=500, content=error_response.model_dump())
+
+
+def _count_rate_limited(request: Request, exc: RateLimitExceeded) -> Response:
+    """slowapi's 429 response, counted."""
+    RATE_LIMIT_REJECTIONS.inc()
+    return _rate_limit_exceeded_handler(request, exc)
 
 
 def _cors_origins(settings: Settings) -> list[str]:
@@ -152,7 +159,7 @@ def create_app(
     limiter = build_limiter(config)
     app.state.limiter = limiter
     app.add_middleware(SlowAPIMiddleware)
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RateLimitExceeded, _count_rate_limited)  # type: ignore[arg-type]
     for endpoint in ops.RATE_LIMIT_EXEMPT:
         limiter.exempt(endpoint)
 

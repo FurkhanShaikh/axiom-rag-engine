@@ -23,7 +23,9 @@ from axiom_rag_engine.config.logging import request_id_ctx
 from axiom_rag_engine.config.observability import (
     CACHE_HITS,
     CACHE_MISSES,
+    LLM_CALLS_PER_REQUEST,
     PIPELINE_DURATION,
+    PIPELINE_HALTS,
     REQUESTS_BY_STATUS,
     TIER_ASSIGNMENTS,
     tag_current_span,
@@ -231,6 +233,10 @@ async def _set_cached(services: AppServices, key: str, response: AxiomResponse) 
 
 def _record_outcome_metrics(response: AxiomResponse, graph_result: dict[str, Any]) -> None:
     REQUESTS_BY_STATUS.labels(status=response.status).inc()
+    if graph_result.get("halt_reason"):
+        PIPELINE_HALTS.labels(reason=str(graph_result["halt_reason"])).inc()
+    if response.usage is not None:
+        LLM_CALLS_PER_REQUEST.observe(response.usage.calls)
     # Claims only, like the response's tier_breakdown: uncited sentences carry
     # no checked quote and used to be counted here as tier 3.
     for sentence in response.final_response:

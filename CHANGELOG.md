@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The request-ID log prefix no longer stacks.** The text formatter prefixed the shared log record in place, so a second handler printed `[id] [id] …`; it now formats a copy.
 - **Grafana: token and spend panels** — tokens/min by model, USD/hour by model, and spend over the last 24 h.
 
+### Added — operational metrics (OBS-3)
+- New Prometheus series: `axiom_rewrite_passes_total`, `axiom_re_retrievals_total`, `axiom_pipeline_halts_total{reason}`, `axiom_llm_calls_per_request` (histogram), `axiom_llm_budget_exhausted_total{cap}`, `axiom_synthesizer_parse_failures_total`, `axiom_search_failures_total{backend}`, `axiom_sources_by_content_mode_total{mode}`, `axiom_rate_limit_rejections_total`, `axiom_cache_errors_total{op}` (Redis errors were only logged) and `axiom_embedding_inputs_total{model}`. Labels are bounded (fixed values, backend class names, `safe_model_label`). The Grafana dashboard gains repair-loop, calls-per-request, failures and snippet-share panels.
+
 ### Fixed — explicit model configuration
 - **Setting a model to its default value is respected.** Startup decided whether the operator chose a model by comparing it with the built-in default, so `AXIOM_DEFAULT_VERIFIER_MODEL=gpt-4o-mini` with only an Anthropic key was silently switched to Haiku. Explicit configuration is now read from the settings sources (`model_fields_set`).
 

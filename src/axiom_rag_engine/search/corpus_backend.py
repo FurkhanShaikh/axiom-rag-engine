@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote
 
+from axiom_rag_engine.config.observability import SEARCH_FAILURES
 from axiom_rag_engine.corpus.store import CorpusStore
 from axiom_rag_engine.embeddings import embed_query_sync
 from axiom_rag_engine.nodes.retriever import SearchBackend
@@ -115,6 +116,7 @@ class CompositeSearchBackend:
         try:
             return backend.search(query)
         except Exception:
+            SEARCH_FAILURES.labels(backend=type(backend).__name__).inc()
             logger.exception(
                 "Backend %s failed for %r; continuing with the rest.",
                 type(backend).__name__,
