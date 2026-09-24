@@ -27,6 +27,7 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -697,6 +698,14 @@ async def _check_contradiction(
     return _parse_contradiction_response(raw)
 
 
+def _verdict_key(claim_text: str, citation: Citation, model: str) -> str:
+    """Identity of one semantic judgement: the claim, the cited chunk and quote,
+    and the judging model. Chunk ids are never reused within a request (retries
+    continue the doc numbering), so the id stands for the chunk's text."""
+    raw = json.dumps([claim_text, citation.chunk_id, citation.exact_source_quote, model])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 async def _verify_citation(
     claim_text: str,
     citation: Citation,
@@ -829,7 +838,13 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
     # and because the budget is stored as a mutable dict (not an immutable int),
     # all tasks share the same counter object automatically.
     task_keys: list[tuple[str, str]] = []
+    verdict_keys: list[str] = []
     coroutines: list = []
+    # Verdicts from earlier passes of this request. A rewrite keeps most
+    # sentences unchanged; re-judging them wastes calls and budget and lets a
+    # verdict flip on identical input.
+    prior_verdicts: dict[str, dict[str, Any]] = dict(state.get("semantic_verdicts") or {})
+    reused: dict[tuple[str, str], tuple[VerificationResult, str | None]] = {}
 
     if semantic_enabled:
         for sentence_dict in draft_sentences:
@@ -845,7 +860,16 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
                     vr_temp = VerificationResult.model_validate(mech_payload)
                     passed_mech = vr_temp.mechanical_check == "passed"
                 if passed_mech:
+                    vkey = _verdict_key(ctext, cit, model)
+                    prior = prior_verdicts.get(vkey)
+                    if prior is not None:
+                        reused[(sid, cit.citation_id)] = (
+                            VerificationResult.model_validate(prior["result"]),
+                            prior["rewrite_reason"],
+                        )
+                        continue
                     task_keys.append((sid, cit.citation_id))
+                    verdict_keys.append(vkey)
                     coroutines.append(
                         _verify_citation(ctext, cit, chunk_lookup, model, primary_domains)
                     )
@@ -857,6 +881,17 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
     results_map: dict[tuple[str, str], tuple[VerificationResult, str | None] | BaseException] = {
         key: result for key, result in zip(task_keys, gathered_results, strict=True)
     }
+    results_map.update(reused)
+    # Remember completed verdicts only; an errored check is retried next pass.
+    known_verdicts = dict(prior_verdicts)
+    for vkey, outcome in zip(verdict_keys, gathered_results, strict=True):
+        if not isinstance(outcome, BaseException):
+            known_verdicts[vkey] = {
+                "result": outcome[0].model_dump(),
+                "rewrite_reason": outcome[1],
+            }
+    if reused:
+        audit.append(_audit("semantic_verdicts_reused", {"count": len(reused)}))
 
     # PASS 2: Collect results and build provisional sentence verdicts. The
     # cross-source gates run after this loop, concurrently across sentences;
@@ -1063,4 +1098,5 @@ async def semantic_verifier_node(state: GraphState) -> dict[str, Any]:
         # owner — it fires exactly once per verification pass.  Incrementing here
         # caused an off-by-one where max_rewrite_loops=3 allowed only 2 rewrites.
         "audit_trail": audit,
+        "semantic_verdicts": known_verdicts,
     }
