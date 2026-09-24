@@ -78,3 +78,23 @@ async def test_rate_limit_outlasting_the_policy_is_a_transient_error() -> None:
 
 def test_eval_has_no_retry_of_its_own() -> None:
     assert not hasattr(seval, "_verify_with_retry")
+
+
+def test_summary_reports_wilson_intervals() -> None:
+    def rec(label: str, got: str) -> object:
+        expected = "passed" if label == "SUPPORT" else "failed"
+        return seval.Record("e", label, expected, got, got == expected, None, 0.0)
+
+    # 12 of 14 unfaithful claims caught, 6 of 16 faithful claims flagged.
+    records = (
+        [rec("CONTRADICT", "failed")] * 12
+        + [rec("CONTRADICT", "passed")] * 2
+        + [rec("SUPPORT", "failed")] * 6
+        + [rec("SUPPORT", "passed")] * 10
+    )
+    ci = seval.summarize(records)["ci95"]
+    low, high = ci["unfaithful_recall"]
+    assert low < 12 / 14 < high
+    assert 0.55 < low < 0.65  # n = 14 leaves a wide interval
+    low, high = ci["unfaithful_precision"]
+    assert low < 12 / 18 < high

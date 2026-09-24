@@ -384,7 +384,9 @@ the semantic gate:
    python tasks.py evals semantic -- --model gpt-4o-mini --limit 200
    ```
 2. **Read the summary** the run prints (recall, precision, f1, accuracy,
-   error_rate).
+   error_rate). Recall, precision and accuracy come with 95% Wilson intervals
+   (`ci95` in the results file) — publish them with the point values, and
+   prefer a sample large enough that the intervals are narrow.
 3. **Set the floors** in `evals/baselines/semantic-verifier.json` a few points
    below each observed value — the `tolerance` band absorbs run-to-run noise, so
    the floor is the "never regress past here" line, not the observed number

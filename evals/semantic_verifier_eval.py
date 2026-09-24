@@ -206,6 +206,11 @@ def summarize(records: list[Record]) -> dict[str, Any]:
     recall = tp / (tp + fn) if (tp + fn) else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
     error_rate = errors / len(records) if records else 0.0
+
+    def _ci(successes: int, n: int) -> list[float]:
+        low, high = gate.wilson_interval(successes, n)
+        return [round(low, 4), round(high, 4)]
+
     return {
         "total": len(records),
         "scored": len(scored),
@@ -217,6 +222,12 @@ def summarize(records: list[Record]) -> dict[str, Any]:
         "unfaithful_recall": round(recall, 4),
         "unfaithful_f1": round(f1, 4),
         "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+        # 95% Wilson intervals: how far each rate could move with more examples.
+        "ci95": {
+            "unfaithful_recall": _ci(tp, tp + fn),
+            "unfaithful_precision": _ci(tp, tp + fp),
+            "accuracy": _ci(tp + tn, len(scored)),
+        },
     }
 
 
@@ -268,9 +279,16 @@ async def run(model: str, limit: int, seed: int, split: str, gate_baseline: Path
     )
 
     _echo()
-    _echo(f"  accuracy             : {summary['accuracy']}")
-    _echo(f"  unfaithful precision : {summary['unfaithful_precision']}")
-    _echo(f"  unfaithful recall    : {summary['unfaithful_recall']}")
+    ci = summary["ci95"]
+    _echo(f"  accuracy             : {summary['accuracy']}  (95% CI {ci['accuracy']})")
+    _echo(
+        f"  unfaithful precision : {summary['unfaithful_precision']}  "
+        f"(95% CI {ci['unfaithful_precision']})"
+    )
+    _echo(
+        f"  unfaithful recall    : {summary['unfaithful_recall']}  "
+        f"(95% CI {ci['unfaithful_recall']})"
+    )
     _echo(f"  unfaithful f1        : {summary['unfaithful_f1']}")
     _echo(f"  confusion            : {summary['confusion']}")
     _echo(
