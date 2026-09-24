@@ -34,7 +34,7 @@ services:
   # ── Ollama (local LLM sidecar) ────────────────────────────────────────────
   # Comment this section out if you are using only cloud APIs (Anthropic/OpenAI).
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.9.0
     container_name: axiom-ollama
     # Run as a non-root numeric UID/GID (no user account required in the image).
     # OLLAMA_MODELS overrides the default /root/.ollama path so the process can
@@ -42,8 +42,12 @@ services:
     user: "1000:1000"
     environment:
       OLLAMA_MODELS: /models
-    ports:
-      - "11434:11434"
+    # Not published: Ollama has no authentication, and the engine reaches it
+    # over the compose network. Pull models with
+    #   docker compose exec ollama ollama pull qwen3:8b
+    # To use it from the host, uncomment (binds to localhost only):
+    # ports:
+    #   - "127.0.0.1:11434:11434"
     volumes:
       - ollama_models:/models
     healthcheck:
@@ -57,7 +61,7 @@ services:
 
   # ── Redis (response cache backing store) ──────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: axiom-redis
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -69,7 +73,7 @@ services:
 
   # ── Prometheus (metrics scraper) ──────────────────────────────────────────
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.4.1
     container_name: axiom-prometheus
     ports:
       - "9090:9090"
@@ -83,7 +87,7 @@ services:
   # ── Grafana (pre-provisioned with Axiom dashboard) ────────────────────────
   # Default login: admin / admin (Grafana prompts to change on first load).
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.0.2
     container_name: axiom-grafana
     ports:
       - "3000:3000"

@@ -466,6 +466,13 @@ Endpoints once the stack is healthy:
 - Grafana    — http://localhost:3000  (login `admin` / `admin`)
   → *Dashboards → Axiom → Axiom Engine*
 
+Ollama is not published to the host (it has no authentication); the engine
+reaches it over the compose network. Pull a model into it with
+`docker compose exec ollama ollama pull qwen3:8b`. Sidecar images are pinned to
+versions and kept current by Dependabot, and CI scans the built engine image
+with Trivy (failing on fixable critical vulnerabilities) and keeps a CycloneDX
+SBOM as a build artifact.
+
 To run without the observability sidecars, comment out the `redis`,
 `prometheus`, and `grafana` services.
 

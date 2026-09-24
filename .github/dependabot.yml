@@ -7,6 +7,21 @@ updates:
     commit-message:
       prefix: "deps"
 
+  # Base image in the Dockerfile and the pinned sidecar images in compose.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

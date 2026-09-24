@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — supply chain and compose (DEP-2)
+- **docker-compose pins its images** (`ollama/ollama:0.9.0`, `redis:7.4-alpine`, `prom/prometheus:v3.4.1`, `grafana/grafana:12.0.2`) instead of `:latest`; Dependabot now updates Docker and compose images.
+- **Ollama's port is no longer published.** It has no authentication and the engine reaches it over the compose network; pull models with `docker compose exec ollama ollama pull <model>`, or uncomment the localhost-only port mapping.
+- **CI scans the built image** with Trivy (fails on critical vulnerabilities that have a fix) and uploads a CycloneDX SBOM.
+
 ### Added — OpenRouter provider
 - **`OPENROUTER_API_KEY` is a first-class provider key.** With no Anthropic or OpenAI key, startup auto-selects `AXIOM_OPENROUTER_SYNTHESIZER_MODEL` (default `openrouter/openai/gpt-4o`) and `AXIOM_OPENROUTER_VERIFIER_MODEL` (default `openrouter/openai/gpt-4o-mini`, the same model as the OpenAI-key verifier). The key counts as an available provider for production's fail-closed check, is pushed to LiteLLM from `.env`, and is redacted by `check-config`.
 
