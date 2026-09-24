@@ -14,7 +14,7 @@ app's settings through ``current_settings()``, bound per request by the API.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from axiom_rag_engine.audit_store import AuditStore
@@ -39,6 +39,10 @@ class AppServices:
     default_verifier_model: str
     started_at: float
     version: str
+    # Readiness dependency checks, cached briefly so frequent probes do not
+    # hammer Redis or SQLite (see api.routes.ops).
+    readiness_checks: dict[str, str] = field(default_factory=dict)
+    readiness_checked_at: float = 0.0
 
     def run_config(self) -> dict[str, Any] | None:
         """LangGraph run config carrying this app's search backend, if any."""

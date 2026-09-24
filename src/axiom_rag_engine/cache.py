@@ -49,6 +49,10 @@ class CacheBackend(Protocol):
         """Release backend resources (connections). Called at shutdown."""
         ...
 
+    async def ping(self) -> bool:
+        """Whether the backend is reachable. Never raises (readiness probes)."""
+        ...
+
 
 class MemoryCacheBackend:
     """Process-local TTL + LRU cache."""
@@ -71,6 +75,9 @@ class MemoryCacheBackend:
 
     async def aclose(self) -> None:
         return None
+
+    async def ping(self) -> bool:
+        return True
 
 
 class RedisCacheBackend:
@@ -146,6 +153,13 @@ class RedisCacheBackend:
                     break
         except (RedisError, OSError) as exc:
             logger.warning("Redis CLEAR failed: %s", exc)
+
+    async def ping(self) -> bool:
+        try:
+            return bool(await self._redis.ping())
+        except Exception as exc:  # any failure means "not reachable" to a probe
+            logger.warning("Redis PING failed: %s", exc)
+            return False
 
     async def aclose(self) -> None:
         try:
