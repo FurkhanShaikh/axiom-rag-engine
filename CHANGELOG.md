@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Docker smoke test
+- CI now boots the built image next to a Redis (as docker-compose does) and requires `/health/ready` to report `ok`, `/v1/status` to show the Redis cache backend (the missing `redis` extra fixed in Wave 6 would fail this), and the numpy extra to import. The image was previously only built and scanned, never started.
+
 ### Changed — CI plumbing
 - One composite setup action (`.github/actions/setup`) replaces five copies of the uv/Python/install steps and turns on uv's download cache keyed on `uv.lock`. CI runs with a read-only token, and a new push to a PR cancels its superseded runs (runs for `main` and tags are never cancelled).
 
