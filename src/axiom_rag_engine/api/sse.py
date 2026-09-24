@@ -24,8 +24,9 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from axiom_rag_engine.graph import finish_with_best_pass
 from axiom_rag_engine.marshalling import marshal_response
 from axiom_rag_engine.utils.llm import LLMBudgetExceededError, get_llm_usage_snapshot
 
@@ -125,13 +126,16 @@ async def stream_pipeline(
     cached_response: AxiomResponse | None = None,
     on_complete: Any | None = None,
     run_config: dict[str, Any] | None = None,
+    deadline_seconds: float = 0.0,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE frames for one pipeline execution.
 
     ``on_complete`` is awaited with ``(AxiomResponse, accumulated_state)``
     immediately before the ``complete`` frame — use it for cache writes,
     Prometheus updates, and audit persistence. ``run_config`` is forwarded to
-    LangGraph (it carries the app's search backend).
+    LangGraph (it carries the app's search backend). ``deadline_seconds`` (0 =
+    none) bounds the run: on expiry the best verified pass is returned, or an
+    ``error`` frame (``deadline_exceeded``) if no pass was verified yet.
     """
     event_id = 0
 
@@ -171,6 +175,8 @@ async def stream_pipeline(
 
     pending_event: asyncio.Task[Any] | None = None
     timeout_task: asyncio.Task[Any] | None = None
+    deadline_at = time.monotonic() + deadline_seconds if deadline_seconds > 0 else None
+    deadline_hit = False
     try:
         stream_kwargs: dict[str, Any] = {"version": "v2"}
         if run_config is not None:
@@ -179,15 +185,22 @@ async def stream_pipeline(
         while True:
             if pending_event is None:
                 pending_event = asyncio.ensure_future(_next(it))
-            # Race the next pipeline event against a keepalive timer so we
-            # don't cancel __anext__() when we want to emit a keepalive.
-            timeout_task = asyncio.ensure_future(asyncio.sleep(_KEEPALIVE_INTERVAL))
+            # Race the next pipeline event against a keepalive timer (capped at
+            # the time left before the deadline) so we don't cancel __anext__()
+            # when we want to emit a keepalive.
+            wait_for = _KEEPALIVE_INTERVAL
+            if deadline_at is not None:
+                wait_for = max(0.0, min(wait_for, deadline_at - time.monotonic()))
+            timeout_task = asyncio.ensure_future(asyncio.sleep(wait_for))
             done, _pending_set = await asyncio.wait(
                 {pending_event, timeout_task}, return_when=asyncio.FIRST_COMPLETED
             )
             if pending_event not in done:
                 timeout_task.cancel()
                 timeout_task = None
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    deadline_hit = True  # the finally below cancels the run
+                    break
                 yield ": keepalive\n\n"
                 continue
             timeout_task.cancel()
@@ -312,6 +325,22 @@ async def stream_pipeline(
             pending_event.cancel()
             with contextlib.suppress(BaseException):
                 await pending_event
+
+    if deadline_hit:
+        final_state = finish_with_best_pass(cast("GraphState", accumulated), "deadline")
+        if final_state is None:
+            yield _sse(
+                "error",
+                {
+                    "type": "error",
+                    "error_type": "deadline_exceeded",
+                    "message": "Request deadline expired before any verified pass.",
+                    "request_id": payload.request_id,
+                },
+                _next_id(),
+            )
+            return
+        accumulated = final_state
 
     # -- marshal final response --
     final_sentences = accumulated.get("final_sentences") or []

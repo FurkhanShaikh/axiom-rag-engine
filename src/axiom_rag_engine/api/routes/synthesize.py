@@ -28,6 +28,7 @@ from axiom_rag_engine.config.observability import (
     tag_current_span,
 )
 from axiom_rag_engine.config.settings import Settings
+from axiom_rag_engine.graph import PipelineDeadlineError, run_pipeline
 from axiom_rag_engine.marshalling import make_error_response, marshal_response
 from axiom_rag_engine.models import AxiomRequest, AxiomResponse
 from axiom_rag_engine.services import AppServices
@@ -286,8 +287,10 @@ async def synthesize(
     Accept an AxiomRequest, execute the LangGraph DAG, and return a fully
     validated AxiomResponse with tier breakdown and confidence score.
 
-    Pipeline errors return HTTP 500 and budget exhaustion HTTP 429; successful,
-    partial, and unanswerable results return HTTP 200. If the client
+    Pipeline errors return HTTP 500, budget exhaustion HTTP 429, and a request
+    deadline that expires before any verified pass HTTP 504 (one that expires
+    later returns the best verified pass); successful, partial, and unanswerable
+    results return HTTP 200. If the client
     disconnects first, the pipeline is cancelled and no further LLM budget is
     spent.
     """
@@ -311,7 +314,13 @@ async def synthesize(
     try:
         with PIPELINE_DURATION.time():
             graph_result = await run_unless_disconnected(
-                request, services.engine.ainvoke(initial_state, config=services.run_config())
+                request,
+                run_pipeline(
+                    services.engine,
+                    initial_state,
+                    services.run_config(),
+                    services.settings.request_deadline_seconds,
+                ),
             )
     except ClientDisconnectedError:
         REQUESTS_BY_STATUS.labels(status="cancelled").inc()
@@ -322,6 +331,10 @@ async def synthesize(
         REQUESTS_BY_STATUS.labels(status="error").inc()
         error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
         return JSONResponse(status_code=429, content=error_resp.model_dump())
+    except PipelineDeadlineError as exc:
+        REQUESTS_BY_STATUS.labels(status="error").inc()
+        error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
+        return JSONResponse(status_code=504, content=error_resp.model_dump())
     except Exception as exc:
         REQUESTS_BY_STATUS.labels(status="error").inc()
         error_resp = make_error_response(payload.request_id, exc, get_llm_usage_snapshot())
@@ -400,6 +413,7 @@ async def synthesize_stream(
             cached_response=cached,
             on_complete=_on_complete,
             run_config=services.run_config(),
+            deadline_seconds=services.settings.request_deadline_seconds,
         ),
         media_type="text/event-stream",
         headers={

@@ -14,6 +14,7 @@ DAG topology:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import time
@@ -238,6 +239,83 @@ def _unless_halted(next_node: str) -> Callable[[GraphState], str]:
 
 
 # ---------------------------------------------------------------------------
+# Request deadline
+# ---------------------------------------------------------------------------
+
+
+class PipelineDeadlineError(Exception):
+    """The request deadline expired before any pass was verified."""
+
+
+class PipelineProgress:
+    """The latest full graph state, as handed to the most recent node.
+
+    LangGraph gives each node the state merged from every completed step, so
+    this is the run's last checkpoint: what a deadline can still return.
+    """
+
+    def __init__(self, state: GraphState) -> None:
+        self.state: GraphState = state
+
+
+_PROGRESS_KEY = "axiom_progress"
+
+
+def _record_progress(config: Any, state: GraphState) -> None:
+    progress = ((config or {}).get("configurable") or {}).get(_PROGRESS_KEY)
+    if isinstance(progress, PipelineProgress):
+        progress.state = state
+
+
+def finish_with_best_pass(state: GraphState, reason: str) -> dict[str, Any] | None:
+    """Final state for a run stopped from outside the graph: ``state`` with the
+    best verified pass as the answer, or None when no pass was verified yet."""
+    if not _has_verified_pass(state):
+        return None
+    halt = _halt_with_best_pass(state, "pipeline", reason, {})
+    return {
+        **state,
+        **halt,
+        "audit_trail": [*(state.get("audit_trail") or []), *halt["audit_trail"]],
+    }
+
+
+async def run_pipeline(
+    engine: Any,
+    initial_state: GraphState,
+    run_config: dict[str, Any] | None,
+    deadline_seconds: float,
+) -> dict[str, Any]:
+    """Run the graph under a wall-clock deadline (0 disables it).
+
+    When the deadline expires after a verified pass, the best pass is returned
+    as a halted run (``halt_reason="deadline"``) instead of losing it.
+
+    Raises:
+        PipelineDeadlineError: the deadline expired before any verified pass.
+    """
+    if deadline_seconds <= 0:
+        return cast(dict[str, Any], await engine.ainvoke(initial_state, config=run_config))
+
+    progress = PipelineProgress(initial_state)
+    config = dict(run_config or {})
+    config["configurable"] = {**(config.get("configurable") or {}), _PROGRESS_KEY: progress}
+    deadline = asyncio.timeout(deadline_seconds)
+    try:
+        async with deadline:
+            return cast(dict[str, Any], await engine.ainvoke(initial_state, config=config))
+    except TimeoutError:
+        if not deadline.expired():
+            raise  # a timeout raised inside the pipeline, not the deadline
+    final = finish_with_best_pass(progress.state, "deadline")
+    if final is None:
+        raise PipelineDeadlineError(
+            f"Request deadline of {deadline_seconds:g}s expired before any verified pass."
+        )
+    return final
+
+
+# ---------------------------------------------------------------------------
 # Node duration instrumentation
 # ---------------------------------------------------------------------------
 
@@ -249,6 +327,7 @@ def _timed_node(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
     # parameter; the wrapper declares it and forwards it to nodes that want it
     # (the retriever reads its search backend from it).
     async def _wrapper(state: GraphState, config: RunnableConfig) -> dict:
+        _record_progress(config, state)
         start = time.monotonic()
         result = await _call_node(fn, state, config)
         NODE_DURATION.labels(node=name).observe(time.monotonic() - start)
