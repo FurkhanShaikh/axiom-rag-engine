@@ -34,7 +34,6 @@ import json
 import math
 import os
 import random
-import re
 import sys
 import threading
 import time
@@ -52,12 +51,21 @@ from embeddings import OllamaEmbedder
 # Production ranker internals — reused so the eval scores the real BM25, not a
 # lookalike. The fast pre-tokenized path replicates this math exactly.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from axiom_rag_engine.embeddings import embed_prefixes
 from axiom_rag_engine.nodes.ranker import (
     _BM25_B,
     _BM25_K1,
+    _RERANK_MAX_PASSAGE_CHARS,
+    _RERANK_MAX_TOKENS,
+    _RERANK_SYSTEM_PROMPT,
+    _RERANK_USER_TEMPLATE,
     _tokenize,
     compute_corpus_idf,
+    order_by_grade,
+    rerank_messages,
+    rrf_scores,
 )
+from axiom_rag_engine.nodes.ranker import _parse_rerank_grade as parse_rerank_grade
 
 EVALS_DIR = Path(__file__).resolve().parent
 SCIFACT_DIR = EVALS_DIR / "data" / "scifact"
@@ -382,10 +390,8 @@ class HybridRanker:
         self._dense.prewarm_queries(queries)
 
     def rank(self, query: str) -> list[str]:
-        scores: dict[str, float] = {}
-        for ranking in (self._bm25.rank(query), self._dense.rank(query)):
-            for rank, doc_id in enumerate(ranking):
-                scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (self._k + rank + 1)
+        # The shipped fusion (nodes.ranker.rrf_scores), not a reimplementation.
+        scores = rrf_scores([self._bm25.rank(query), self._dense.rank(query)], self._k)
         # Highest fused score first; doc_id tiebreak keeps the order reproducible.
         return sorted(scores, key=lambda d: (-scores[d], d))
 
@@ -395,52 +401,12 @@ class HybridRanker:
 # ---------------------------------------------------------------------------
 
 # Folded into the score cache key so editing the prompt invalidates cached grades.
-_RERANK_PROMPT_VERSION = "v1"
-
-_RERANK_SYSTEM_PROMPT = """\
-You grade how relevant a passage is to a search query.
-
-Reply with ONLY one integer, nothing else:
-  3 = the passage directly answers or verifies the query
-  2 = the passage addresses the query's topic with substantive related evidence
-  1 = the passage is loosely related to the topic
-  0 = the passage is irrelevant to the query
-"""
-
-_RERANK_USER_TEMPLATE = """\
-QUERY: {query}
-
-PASSAGE:
-{passage}
-
-Relevance grade (0-3), one integer only:"""
-
-# Passages are capped so one long abstract can't dominate latency; SciFact and
-# ArguAna docs almost always fit.
-_RERANK_MAX_PASSAGE_CHARS = 2_000
-# Local graders (gemma4:e4b, qwen3.5:9b) are *thinking* models: they emit a
-# hidden reasoning trace (~250-700 tokens) before the final digit. Ollama strips
-# the <think> block, but the budget must still cover it or the reply is truncated
-# to empty. 2048 comfortably covers both; the parser also strips any inline
-# <think> for models that don't hide it.
-_RERANK_MAX_TOKENS = 2048
+# Grades are cached under a digest of the shipped prompt, so editing the prompt
+# in nodes/ranker.py invalidates cached grades automatically.
+_RERANK_PROMPT_VERSION = hashlib.sha256(
+    (_RERANK_SYSTEM_PROMPT + "\x00" + _RERANK_USER_TEMPLATE).encode("utf-8")
+).hexdigest()[:12]
 _RERANK_CACHE_DIR = EVALS_DIR / "data" / "rerank_cache"
-
-_GRADE_RE = re.compile(r"\b([0-3])\b")
-
-
-def parse_rerank_grade(raw: str) -> int:
-    """Extract the 0-3 grade from an LLM reply. Raises ValueError on garbage.
-
-    Tolerates thinking blocks, code fences, and prose like "Score: 2" — the
-    first standalone digit 0-3 after cleanup wins.
-    """
-    clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    clean = re.sub(r"```[a-z]*", "", clean).strip()
-    match = _GRADE_RE.search(clean)
-    if match is None:
-        raise ValueError(f"no 0-3 grade in reranker reply: {raw[:120]!r}")
-    return int(match.group(1))
 
 
 class LLMReranker:
@@ -508,13 +474,7 @@ class LLMReranker:
 
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": _RERANK_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _RERANK_USER_TEMPLATE.format(query=query, passage=passage),
-                },
-            ],
+            "messages": rerank_messages(query, passage),
             "temperature": 0.0,
             "max_tokens": _RERANK_MAX_TOKENS,
         }
@@ -561,24 +521,12 @@ class LLMReranker:
                 grades = list(pool.map(lambda d: self._grade(query, d), head))
         else:
             grades = [self._grade(query, d) for d in head]
-        # Grade descending; base rank as tiebreak (stable refinement).
-        order = sorted(range(len(head)), key=lambda i: (-grades[i], i))
-        return [head[i] for i in order] + tail
+        # The shipped refinement rule: grade descending, base rank as tiebreak.
+        return [head[i] for i in order_by_grade(grades)] + tail
 
 
 _METHODS = ("bm25", "dense", "hybrid", "rerank")
 _NEEDS_EMBEDDER = frozenset({"dense", "hybrid"})
-
-
-def _embed_prefixes(model: str) -> tuple[str, str]:
-    """Return (doc_prefix, query_prefix) for instructed embedders.
-
-    nomic-embed-text is trained with task prefixes and loses substantial
-    retrieval quality without them. Other models default to no prefix.
-    """
-    if "nomic" in model.lower():
-        return "search_document: ", "search_query: "
-    return "", ""
 
 
 def build_ranker(method: str, corpus: Corpus, embedder: OllamaEmbedder | None) -> Ranker:
@@ -691,7 +639,7 @@ def run(
 
         load_dotenv()
         base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
-        doc_prefix, query_prefix = _embed_prefixes(embed_model)
+        doc_prefix, query_prefix = embed_prefixes(embed_model)
         embedder = OllamaEmbedder(
             model=embed_model,
             base_url=base,

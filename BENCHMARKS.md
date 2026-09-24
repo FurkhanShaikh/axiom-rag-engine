@@ -3,19 +3,20 @@
 Axiom's claim is that it verifies citations. That claim is only credible with
 numbers, so this page is where the verification quality is measured and
 published. The measurements come from the eval harness in [`evals/`](evals/).
-The semantic-verifier, golden, and calibration evals run the **production** code
-path. The retrieval eval does not yet: it re-implements BM25 over whole SciFact
-abstracts (a fast path pinned to the production scoring function by a unit
-test), and its hybrid and rerank methods are separate eval-side
-implementations — so its numbers describe the ranking method, not the shipped
-ranker's chunked, quality-blended ranking. Moving it onto the production ranker
-is tracked in #51.
+The semantic-verifier, golden, calibration, and **production-shaped retrieval**
+evals run the shipped code path. The corpus-wide retrieval eval ranks all ~5,000
+SciFact abstracts to compare ranking *methods*: its BM25 is a fast path pinned to
+the production scoring function by a unit test, and its hybrid and rerank methods
+use the shipped fusion (`rrf_scores`) and grading prompt. What production does
+with a handful of search results — chunk, score, rank with the quality blend,
+trim — is measured by the production-shaped eval below.
 
 ## What is measured
 
 | Layer | What it answers | Dataset | Needs LLM keys |
 |---|---|---|---|
 | Retrieval quality | Does the ranker surface the right sources near the top? | [SciFact](https://github.com/allenai/scifact) dev split | No |
+| Production-shaped retrieval | Does the shipped retriever → scorer → ranker put gold evidence first and keep it in the synthesizer's context? | SciFact dev split | No |
 | Semantic verifier accuracy | Does the verifier pass faithful claims and fail unfaithful ones? | SciFact dev split | Yes |
 | End-to-end golden set | Does the full pipeline answer, tier, and gate as specified? | `evals/golden/seed.jsonl` (16 diagnostic cases) | Deterministic subset: no |
 
@@ -219,6 +220,40 @@ re-runs and larger samples are incremental. Not gated: reranking needs an LLM.
 fast model the operator chooses — the same pattern as the synthesizer/verifier.
 The eval justifies the feature; latency justifies keeping it off by default and
 model-agnostic.
+
+### Production-shaped retrieval — SciFact dev (2026-09-24)
+
+`evals/pipeline_retrieval_eval.py` gives each of the 188 claims a small search
+pool — its gold documents plus the hardest non-gold ones (top corpus-BM25
+distractors), in search order — and runs it through the **shipped**
+`retriever_node` → `scorer_node` → `ranker_node` with `max_ranked_chunks=10`,
+under explicit settings (no embedder or reranker). It scores what the
+synthesizer would see: whether the top chunk is gold (p@1), the reciprocal rank
+of the first gold chunk (MRR), and whether a gold chunk survives the trim into
+the context (evidence recall). 95% Wilson intervals in brackets.
+
+| pool | variant | p@1 | MRR | evidence recall |
+|---|---|---|---|---|
+| 5 | production blend | 0.654 [0.584, 0.719] | 0.779 | 1.000 (nothing trimmed) |
+| 5 | BM25 only | 0.649 [0.578, 0.714] | 0.776 | 1.000 |
+| **10** | **production blend** | **0.654 [0.584, 0.719]** | **0.748** | **0.968 [0.932, 0.985]** |
+| 10 | BM25 only | 0.644 [0.573, 0.709] | 0.742 | 0.963 [0.925, 0.982] |
+| 20 | production blend | 0.617 [0.546, 0.684] | 0.711 | 0.904 [0.854, 0.939] |
+| 20 | BM25 only | 0.617 [0.546, 0.684] | 0.711 | 0.904 [0.854, 0.939] |
+
+**Finding: the quality blend neither helps nor hurts here.** 40% of the shipped
+ranking score is the quality blend (domain authority plus length and
+data-marker heuristics); against BM25 alone it moves at most two claims, well
+inside the intervals. On SciFact the domain signal is constant and every
+abstract is similar prose, so this does not show the heuristics are useless on
+web pages — it shows they are unmeasured there, and should not be tuned on this
+data (#27). What the table does show: as the pool grows the trim starts to
+bite, and at 20 documents one claim in ten loses all of its gold evidence
+before synthesis.
+
+The **pool=10, production** row is a per-PR gate (`tasks.py evals gate`). The
+run is deterministic, so its floors are pinned to the observed values: a single
+claim changing its outcome fails CI.
 
 ### Query expansion — live web (2026-09-22)
 

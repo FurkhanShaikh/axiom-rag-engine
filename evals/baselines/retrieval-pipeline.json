@@ -1,0 +1,13 @@
+{
+  "eval": "retrieval_pipeline",
+  "enforcement": "enforce",
+  "recorded_at": "2026-09-24",
+  "dataset": "scifact/dev",
+  "sample": "all 188 labeled claims, pool=10 docs, max_ranked=10, variant=production",
+  "notes": "The shipped retriever -> scorer -> ranker over a 10-document search pool per claim (gold documents plus the hardest BM25 distractors). Fully deterministic (fixed corpus, explicit settings, no LLM or embedder), so floors are pinned to the observed values with only a float-rounding tolerance: one claim changing p@1 or evidence recall moves the metric by 0.0053 and fails the gate. Observed: p_at_1=0.6543 (123/188), mrr=0.7483, evidence_recall=0.9681 (182/188). The BM25-only variant (quality weight 0) scores p_at_1=0.6436, mrr=0.7422, evidence_recall=0.9628 - within one or two claims of the production blend.",
+  "metrics": {
+    "p_at_1": { "floor": 0.6543, "tolerance": 0.001 },
+    "mrr": { "floor": 0.7483, "tolerance": 0.001 },
+    "evidence_recall": { "floor": 0.9681, "tolerance": 0.001 }
+  }
+}
