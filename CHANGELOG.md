@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `test_check_config_output_masks_every_secret` failed on Windows: its stripped subprocess environment lacked `SYSTEMROOT`, which Windows needs to initialise networking (WinError 10106). CI (Linux) was unaffected.
 
+### Dependencies
+- **FastAPI is held below 0.137.** From 0.137, included routers are mounted as one wrapper route that slowapi's middleware cannot look inside, so the default rate limit silently stopped applying to `/v1/synthesize`, `/v1/documents` and `/v1/audits` (caught by `test_rate_limit_is_per_app` on the Dependabot bump). Dependabot ignores FastAPI `>=0.137` until slowapi handles it.
+- Minor and patch updates for the rest of the stack: LiteLLM 1.102 (now pulls in `boto3`), LangGraph 1.2, Starlette 1.7, pydantic 2.13, OpenTelemetry 1.45, uvicorn 0.54, slowapi 0.1.10, ruff 0.16, and others. Also mypy 2.3, the redis client 8.1, and the Python 3.14 base image.
+
 ### Fixed — docker-compose stack did not start
 - **Ollama crash-looped, so the stack never came up.** It runs as UID 1000, but the named volume is created root-owned and its home was `/`, so it could write neither its key nor its models (`mkdir /.ollama: permission denied`), and the engine waits for Ollama to be healthy. A one-shot `ollama-init` step now hands the volume to that UID, and Ollama keeps its key and models there (`HOME=/home/ollama`). Found by the new compose smoke test on its first run. Existing `ollama_models` volumes are re-owned on the next start; models pulled into the old `/models` layout need pulling again.
 

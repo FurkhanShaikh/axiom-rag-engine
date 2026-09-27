@@ -11,6 +11,11 @@ updates:
       prefix: "deps"
     # Minor and patch bumps land as one PR (each bump rewrites uv.lock, so
     # separate PRs conflict with each other); major bumps stay individual.
+    # FastAPI is held below 0.137 (see pyproject.toml): newer versions turn
+    # off slowapi's default rate limits.
+    ignore:
+      - dependency-name: "fastapi"
+        versions: [">=0.137"]
     groups:
       python-minor-and-patch:
         update-types: ["minor", "patch"]

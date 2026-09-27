@@ -52,7 +52,7 @@ def download_scifact() -> None:
     _echo(f"Downloading SciFact from {SCIFACT_URL} ...")
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "scifact.tar.gz"
-        urllib.request.urlretrieve(SCIFACT_URL, archive)  # noqa: S310 - fixed https URL
+        urllib.request.urlretrieve(SCIFACT_URL, archive)
         _echo("Extracting ...")
         with tarfile.open(archive, "r:gz") as tar:
             for member in tar.getmembers():
