@@ -523,6 +523,33 @@ class AxiomResponse(BaseModel):
         default=None,
         description="LLM token counts and best-effort USD cost for this request.",
     )
+    halt_reason: Literal["node_error", "synthesizer_gave_up", "deadline"] | None = Field(
+        default=None,
+        description=(
+            "Set when the run stopped before its rewrite/retry loop finished and "
+            "returned its best verified pass instead of failing: a later pass errored "
+            "(node_error), a rewrite gave up (synthesizer_gave_up), or the request "
+            "deadline expired (deadline). None for a run that finished normally."
+        ),
+    )
+    error_type: (
+        Literal[
+            "budget_exceeded",
+            "deadline_exceeded",
+            "llm_unavailable",
+            "llm_output_unusable",
+            "internal",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description=(
+            "Why the request failed; set only when status='error'. The same vocabulary "
+            "as SSE error frames. HTTP: budget_exceeded 422, deadline_exceeded 504, "
+            "llm_unavailable / llm_output_unusable 502 (the LLM provider failed), "
+            "internal 500."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -86,6 +86,7 @@ def marshal_response(
         final_response=final_sentences,
         debug=debug,
         usage=_usage_summary_from_snapshot(usage_snapshot),
+        halt_reason=graph_result.get("halt_reason"),
     )
 
 
@@ -94,6 +95,7 @@ def make_error_response(
     error: Exception,
     usage_snapshot: dict[str, Any] | None = None,
     public_message: str | None = None,
+    error_type: str = "internal",
 ) -> AxiomResponse:
     """
     Build a structured error response matching the AxiomResponse schema.
@@ -122,4 +124,5 @@ def make_error_response(
         error_message=public_message
         or f"Internal pipeline error — see server logs for request {request_id}.",
         usage=_usage_summary_from_snapshot(usage_snapshot),
+        error_type=error_type,  # type: ignore[arg-type]
     )

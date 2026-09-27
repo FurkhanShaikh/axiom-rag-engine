@@ -321,7 +321,7 @@ async def test_stream_pipeline_emits_error_on_exception() -> None:
     )
     assert frames[0]["type"] == "accepted"
     assert frames[-1]["type"] == "error"
-    assert frames[-1]["error_type"] == "RuntimeError"
+    assert frames[-1]["error_type"] == "internal"  # an engine failure, not the provider
 
 
 # ---------------------------------------------------------------------------

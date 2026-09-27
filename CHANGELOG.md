@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — failures and early stops are visible to clients
+- **`halt_reason` is a top-level response field.** A run that stops early but returns its best verified pass (`node_error`, `synthesizer_gave_up`, `deadline`) said so only in the debug block; clients could not tell a complete answer from one cut short.
+- **Typed first-pass failures.** Error responses carry an `error_type` (`budget_exceeded`, `deadline_exceeded`, `llm_unavailable`, `llm_output_unusable`, `internal`), the vocabulary SSE `error` frames already used — SSE now uses it for every failure instead of a raw exception class name. An LLM provider failure or unusable model output after retries is HTTP **502** (was 500, indistinguishable from an engine bug). The synthesizer raises `SynthesizerUnavailableError` / `SynthesizerOutputError` (both `RuntimeError`s) so the audit trail records which.
+
+### Fixed
+- `test_check_config_output_masks_every_secret` failed on Windows: its stripped subprocess environment lacked `SYSTEMROOT`, which Windows needs to initialise networking (WinError 10106). CI (Linux) was unaffected.
+
 ### Fixed — docker-compose stack did not start
 - **Ollama crash-looped, so the stack never came up.** It runs as UID 1000, but the named volume is created root-owned and its home was `/`, so it could write neither its key nor its models (`mkdir /.ollama: permission denied`), and the engine waits for Ollama to be healthy. A one-shot `ollama-init` step now hands the volume to that UID, and Ollama keeps its key and models there (`HOME=/home/ollama`). Found by the new compose smoke test on its first run. Existing `ollama_models` volumes are re-owned on the next start; models pulled into the old `/models` layout need pulling again.
 

@@ -24,6 +24,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+from axiom_rag_engine.errors import error_type_for
 from axiom_rag_engine.graph import (
     Keepalive,
     NodeFinished,
@@ -260,7 +261,7 @@ async def stream_pipeline(
             "error",
             {
                 "type": "error",
-                "error_type": type(exc).__name__,
+                "error_type": error_type_for(exc),
                 "message": f"Pipeline error — see server logs for {payload.request_id}.",
                 "request_id": payload.request_id,
             },

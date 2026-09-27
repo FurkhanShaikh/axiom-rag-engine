@@ -67,7 +67,9 @@ def _failure(entry: dict[str, Any]) -> dict[str, Any]:
 
 def test_pipeline_error_keeps_the_trail() -> None:
     with TestClient(_app()) as client, patch("litellm.acompletion", side_effect=_provider_down):
-        assert client.post("/v1/synthesize", json=_body("boom")).status_code == 500
+        assert (
+            client.post("/v1/synthesize", json=_body("boom")).status_code == 502
+        )  # provider failure: upstream, not an engine bug
         entry = _trail(client, "boom")
 
     assert entry["status"] == "error"
@@ -75,7 +77,10 @@ def test_pipeline_error_keeps_the_trail() -> None:
     # Everything that completed before the failure is kept.
     assert "retriever_complete" in types
     assert "ranker_complete" in types
-    assert _failure(entry) == {"failed_node": "synthesizer", "error_type": "RuntimeError"}
+    assert _failure(entry) == {
+        "failed_node": "synthesizer",
+        "error_type": "SynthesizerUnavailableError",
+    }
 
 
 def test_budget_exhaustion_keeps_the_trail() -> None:
@@ -92,4 +97,7 @@ def test_stream_error_keeps_the_trail() -> None:
         assert "event: error" in resp.text
         entry = _trail(client, "stream-boom")
     assert entry["status"] == "error"
-    assert _failure(entry) == {"failed_node": "synthesizer", "error_type": "RuntimeError"}
+    assert _failure(entry) == {
+        "failed_node": "synthesizer",
+        "error_type": "SynthesizerUnavailableError",
+    }

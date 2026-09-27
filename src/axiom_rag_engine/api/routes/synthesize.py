@@ -34,6 +34,7 @@ from axiom_rag_engine.config.observability import (
     tag_current_span,
 )
 from axiom_rag_engine.config.settings import Settings, use_settings
+from axiom_rag_engine.errors import error_type_for, is_upstream_failure
 from axiom_rag_engine.graph import (
     PipelineDeadlineError,
     PipelineProgress,
@@ -478,7 +479,11 @@ async def synthesize(
         """Error response for a failed run, keeping the trail of how far it got."""
         await run.failed(with_failure_event(dict(progress.state), progress.node, exc))
         error_resp = make_error_response(
-            payload.request_id, exc, get_llm_usage_snapshot(), public_message
+            payload.request_id,
+            exc,
+            get_llm_usage_snapshot(),
+            public_message,
+            error_type=error_type_for(exc),
         )
         return JSONResponse(status_code=status_code, content=error_resp.model_dump())
 
@@ -510,7 +515,8 @@ async def synthesize(
     except PipelineDeadlineError as exc:
         return await _failed(504, exc)
     except Exception as exc:
-        return await _failed(500, exc)
+        # 502 when the LLM provider (our upstream) failed; 500 for engine bugs.
+        return await _failed(502 if is_upstream_failure(exc) else 500, exc)
     finally:
         await run.charge()
 

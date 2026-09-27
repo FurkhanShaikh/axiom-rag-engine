@@ -131,7 +131,7 @@ def test_failed_runs_are_charged_to_the_key() -> None:
     ):
         resp = client.post("/v1/synthesize", json=_BODY, headers={"X-API-Key": _KEY})
         spent = client.portal.call(app.state.services.spend_ledger.spent, _key_id(_KEY), utc_day())
-    assert resp.status_code == 500  # two unparseable replies fail the synthesizer
+    assert resp.status_code == 502  # two unparseable replies: the LLM output was unusable
     assert spent == 0.02  # two calls, each priced at $0.01
     after = REGISTRY.get_sample_value("axiom_key_spend_usd_total", metric) or 0.0
     assert round(after - before, 6) == 0.02

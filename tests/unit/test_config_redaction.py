@@ -9,6 +9,7 @@ saying they were "not shown". Secret fields are now recognised by name.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -36,6 +37,10 @@ def test_redacted_dict_masks_every_secret(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_check_config_output_masks_every_secret() -> None:
     env = {"AXIOM_ENV": "development", "PATH": "", **_SECRETS}
+    # Windows cannot initialise networking (asyncio's _overlapped, WinError
+    # 10106) in a child process without SYSTEMROOT; it holds no secrets.
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     out = subprocess.run(
         [sys.executable, "-m", "axiom_rag_engine", "check-config", "--format", "json"],
         capture_output=True,

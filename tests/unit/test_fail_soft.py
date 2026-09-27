@@ -155,7 +155,7 @@ class TestLaterPassFailureReturnsBestPass:
         assert _tiers(result) == [("s_01", 3), ("s_02", 5)]
         # Error type only — provider messages can carry account details.
         payload = _halt_events(result)[0]["payload"]
-        assert payload["error_type"] == "RuntimeError"
+        assert payload["error_type"] == "SynthesizerUnavailableError"
         assert "529" not in json.dumps(payload)
 
     async def test_synthesizer_gives_up_on_rewrite(self) -> None:

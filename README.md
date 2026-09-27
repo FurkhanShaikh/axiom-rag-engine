@@ -471,6 +471,25 @@ python tasks.py clean            # remove caches + venv
 
 See the interactive docs at `http://localhost:8000/docs` when the server is running.
 
+### When a run stops early or fails
+
+- **Stopped early, answer returned.** If a later rewrite pass fails, a rewrite
+  gives up, or `AXIOM_REQUEST_DEADLINE_SECONDS` expires *after* a pass was
+  verified, the best verified pass is returned (HTTP 200) with a top-level
+  `halt_reason`: `node_error`, `synthesizer_gave_up`, or `deadline`. `null`
+  means the run finished normally.
+- **Failed, no answer.** Before any pass is verified, the response has
+  `status: "error"` and an `error_type` — the same vocabulary as SSE `error`
+  frames:
+
+  | `error_type` | HTTP | Meaning |
+  |---|---|---|
+  | `budget_exceeded` | 422 | The request hit its LLM call/token budget (retrying would hit it again) |
+  | `deadline_exceeded` | 504 | The request deadline expired |
+  | `llm_unavailable` | 502 | The LLM provider failed after retries |
+  | `llm_output_unusable` | 502 | The model's output stayed unparseable after retries |
+  | `internal` | 500 | An engine error — see server logs for the `request_id` |
+
 ## Docker
 
 The bundled `docker-compose.yml` brings up the full stack — Axiom, Ollama,

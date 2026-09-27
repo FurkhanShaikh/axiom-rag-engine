@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from axiom_rag_engine.config.observability import SYNTHESIZER_PARSE_FAILURES
 from axiom_rag_engine.config.settings import current_settings
+from axiom_rag_engine.errors import SynthesizerOutputError, SynthesizerUnavailableError
 from axiom_rag_engine.models import SynthesizerOutput
 from axiom_rag_engine.schemas import SYNTHESIZER_SCHEMA
 from axiom_rag_engine.state import GraphState
@@ -448,7 +449,14 @@ async def synthesizer_node(state: GraphState) -> dict[str, Any]:
             break
 
     if output is None:
-        raise RuntimeError(f"Synthesizer stage failed: {last_error}") from last_error
+        # Typed so the endpoint can answer 502 (the provider failed) rather than a
+        # 500 that reads as an engine bug; both remain RuntimeErrors.
+        error_cls = (
+            SynthesizerOutputError
+            if isinstance(last_error, ValueError)
+            else SynthesizerUnavailableError
+        )
+        raise error_cls(f"Synthesizer stage failed: {last_error}") from last_error
 
     # is_answerable escape hatch triggered by the LLM itself.
     if not output.is_answerable:
