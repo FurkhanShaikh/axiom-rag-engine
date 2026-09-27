@@ -157,6 +157,16 @@ def _reset_settings_cache(monkeypatch):
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    """Give each test a fresh rate-limit budget on the module-level ``app``.
+
+    Its limiter outlives every test, so without a reset all tests that post to
+    it share one per-minute budget, and a fast run gets 429s.
+    """
+    app.state.limiter.reset()
+
+
 @pytest.fixture()
 def client(monkeypatch):
     """TestClient fixture with no Tavily key (each app startup gets a fresh cache)."""
