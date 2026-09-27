@@ -38,7 +38,7 @@ services:
   # "mkdir /.ollama: permission denied"). This one-shot step hands the volume
   # to that UID before Ollama starts.
   ollama-init:
-    image: busybox:1.37
+    image: busybox:1.38
     command: ["chown", "-R", "1000:1000", "/home/ollama"]
     volumes:
       - ollama_models:/home/ollama
