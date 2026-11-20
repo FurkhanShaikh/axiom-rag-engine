@@ -14,7 +14,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from slowapi import Limiter
 
 from axiom_rag_engine.api.auth import verify_api_key
 from axiom_rag_engine.api.deps import Services
@@ -532,7 +531,6 @@ async def synthesize(
 
 async def synthesize_stream(
     services: Services,
-    request: Request,
     payload: AxiomRequest,
     _api_key: str | None = Depends(verify_api_key),
 ) -> Response:
@@ -578,24 +576,17 @@ async def synthesize_stream(
     )
 
 
-def build_router(limiter: Limiter, stream_rate_limit: str) -> APIRouter:
-    """The pipeline routes, with the stream endpoint bound to ``limiter``.
-
-    Built per app because slowapi binds a route-specific limit to a limiter
-    instance at decoration time.
-    """
-    router = APIRouter()
-    router.add_api_route(
-        "/v1/synthesize",
-        synthesize,
-        methods=["POST"],
-        response_model=AxiomResponse,
-        summary="Run the Axiom Engine verification pipeline.",
-    )
-    router.add_api_route(
-        "/v1/synthesize/stream",
-        limiter.limit(stream_rate_limit)(synthesize_stream),
-        methods=["POST"],
-        summary="Run the Axiom Engine pipeline with SSE progress events.",
-    )
-    return router
+router = APIRouter()
+router.add_api_route(
+    "/v1/synthesize",
+    synthesize,
+    methods=["POST"],
+    response_model=AxiomResponse,
+    summary="Run the Axiom Engine verification pipeline.",
+)
+router.add_api_route(
+    "/v1/synthesize/stream",
+    synthesize_stream,
+    methods=["POST"],
+    summary="Run the Axiom Engine pipeline with SSE progress events.",
+)

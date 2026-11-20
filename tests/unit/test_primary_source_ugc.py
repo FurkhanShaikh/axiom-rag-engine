@@ -60,6 +60,18 @@ class TestUserGeneratedContentIsNotPrimary:
         assert is_primary_source("docs.python.org", "", PRIMARY) is True
         assert is_primary_source("users.rust-lang.org", "", PRIMARY) is False
 
+    def test_userinfo_cannot_spoof_primary_or_bypass_bans(self) -> None:
+        from axiom_rag_engine.nodes.retriever import extract_domain, is_banned
+
+        spoof = "https://foo.gov:80@evil.com/page"
+        assert extract_domain(spoof) == "evil.com"
+        assert is_primary_source(extract_domain(spoof), spoof, PRIMARY) is False
+
+        ban_bypass = "https://x@reddit.com/r/foo"
+        assert extract_domain(ban_bypass) == "reddit.com"
+        assert is_banned(ban_bypass, ["reddit.com"]) is True
+        assert is_banned("https://reddit.com./r/foo", ["reddit.com"]) is True
+
 
 def _semantic_pass(**_: Any) -> MagicMock:
     response = MagicMock()

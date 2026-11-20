@@ -220,7 +220,7 @@ def _fail_soft(name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
         if (
             name == "synthesizer"
             and _has_verified_pass(state)
-            and not result.get("is_answerable", True)
+            and (not result.get("is_answerable", True) or not result.get("draft_sentences"))
         ):
             # A later pass declaring the query unanswerable is a failed repair,
             # not new evidence: an earlier pass already answered from sources.

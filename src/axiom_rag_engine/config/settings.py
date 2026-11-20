@@ -150,12 +150,12 @@ class Settings(BaseSettings):
     # ── Rate limiting / response cache ───────────────────────────────────
     rate_limit: str = Field(
         default="20/minute",
-        description="SlowAPI rate-limit string applied per API key or IP.",
+        description="Rate-limit rule applied per API key or IP (e.g. '20/minute').",
     )
     stream_rate_limit: str = Field(
         default="20/minute",
         description=(
-            "SlowAPI rate-limit string applied per API key or IP for the "
+            "Rate-limit rule applied per API key or IP for the "
             "streaming endpoint (/v1/synthesize/stream). Defaults to the same "
             "limit as ``rate_limit``."
         ),
@@ -511,7 +511,10 @@ class Settings(BaseSettings):
     )
     trusted_proxy_ips: CommaSepList = Field(
         default_factory=list,
-        description="IPs whose X-Forwarded-For headers may be trusted. Use '*' only behind a private ingress.",
+        description=(
+            "IPs or CIDRs whose X-Forwarded-For headers may be trusted. "
+            "Use '*' only behind a private ingress."
+        ),
     )
     max_body_bytes: int = Field(
         default=128 * 1024,

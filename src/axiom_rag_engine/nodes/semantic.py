@@ -119,7 +119,10 @@ Assess the claim against the quote and chunk. Output valid JSON only.
 # as an instruction, and enforce a size cap so one oversized page can't
 # dominate the verifier's context.
 _MAX_UNTRUSTED_CHARS = 6_000
-_FENCE_BREAKERS = re.compile(r"<<<\s*(?:END_?)?(?:CHUNK|QUOTE|META)\s*>>>", re.IGNORECASE)
+_FENCE_BREAKERS = re.compile(
+    r"<<<\s*(?:END[\s_]?)?(?:CHUNK|QUOTE|META|SOURCE\b[^>\n]*)\s*>>>",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_untrusted(raw: str) -> str:

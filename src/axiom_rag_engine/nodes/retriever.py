@@ -271,11 +271,10 @@ def extract_domain(url: str) -> str:
         parsed = urlparse(url)
     except ValueError:
         return ""
-    domain = (parsed.netloc or "").lower()
+    domain = (parsed.hostname or "").lower().rstrip(".")
     if domain.startswith("www."):
         domain = domain[4:]
-    # Strip any :port suffix.
-    return domain.split(":", 1)[0]
+    return domain
 
 
 def is_banned(url: str, banned_domains: list[str]) -> bool:

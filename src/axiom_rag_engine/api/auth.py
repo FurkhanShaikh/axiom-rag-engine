@@ -25,9 +25,13 @@ _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 def settings_from_request(request: Request | None) -> Settings:
     """The settings governing ``request``: its app's, else the process settings."""
     app = request.scope.get("app") if request is not None else None
-    services = getattr(getattr(app, "state", None), "services", None)
+    state = getattr(app, "state", None)
+    services = getattr(state, "services", None)
     if services is not None:
         return services.settings  # type: ignore[no-any-return]
+    override = getattr(state, "settings_override", None)
+    if override is not None:
+        return override  # type: ignore[no-any-return]
     return get_settings()
 
 
