@@ -168,4 +168,4 @@ async def get_status(
 
 
 # Probes and the status snapshot are never rate-limited (orchestrators poll them).
-RATE_LIMIT_EXEMPT = (health, health_live, health_ready, get_status)
+RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/health/live", "/health/ready", "/v1/status"})

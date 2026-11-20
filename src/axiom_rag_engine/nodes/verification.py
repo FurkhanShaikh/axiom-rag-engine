@@ -26,6 +26,7 @@ from typing import Any, cast
 from axiom_rag_engine.config.observability import LOOP_EXHAUSTED_TIER5, get_tracer
 from axiom_rag_engine.models import VerificationResult
 from axiom_rag_engine.nodes.semantic import semantic_verifier_node
+from axiom_rag_engine.scoring import has_checkable_content
 from axiom_rag_engine.state import GraphState, loop_limits, rewrites_remaining
 from axiom_rag_engine.utils.audit import make_audit_event
 from axiom_rag_engine.verifiers.mechanical import MechanicalVerifier
@@ -51,22 +52,33 @@ def _build_tier5_rewrite_request(
 def _pass_rank(final_sentences: list[dict[str, Any]]) -> list[int]:
     """Sort key for a verification pass — lower is better.
 
-    Primary: fewest sentences that still fail verification (Tier 4/5). Then:
-    most fully verified claims (Tier 1-3 and not "unverified").
+    1. Any pass with at least one verified claim beats an empty / all-unverified / all-failed pass.
+    2. Fewest total unresolved claims (Tier 4/5 + cited unverified + uncited checkable claims).
+    3. Tie-break: fewest proven failures or checkable uncited claims (prefers cited unverified over Tier 4/5).
+    4. Most verified claims (Tier 1-3, cited, not "unverified").
     """
     failed = 0
+    unverified_cited = 0
+    uncited_checkable = 0
     verified = 0
     for sentence in final_sentences:
         vr = sentence.get("verification") or {}
         if vr.get("tier") in (4, 5):
             failed += 1
-        elif (
-            sentence.get("is_cited")
-            and vr.get("tier_label") != "unverified"
-            and vr.get("tier") in (1, 2, 3)
-        ):
-            verified += 1
-    return [failed, -verified]
+        elif sentence.get("is_cited"):
+            if vr.get("tier_label") == "unverified":
+                unverified_cited += 1
+            elif vr.get("tier") in (1, 2, 3):
+                verified += 1
+        elif has_checkable_content(str(sentence.get("text") or "")):
+            uncited_checkable += 1
+    unresolved = failed + unverified_cited + uncited_checkable
+    return [
+        0 if verified > 0 else 1,
+        unresolved,
+        failed + uncited_checkable,
+        -verified,
+    ]
 
 
 async def verification_node(state: GraphState) -> dict[str, Any]:
@@ -253,17 +265,15 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
     if best_rank is None or rank < best_rank:
         best_rank, best_sentences = rank, final_sentences
 
-    # Terminal-by-exhaustion: failures remain and neither another rewrite nor
-    # another retrieval round is allowed (mirrors route_post_verification).
+    # Terminal pass: no rewrites remain (pending_count == 0, or both rewrite
+    # loops and retrieval retries are exhausted — mirrors route_post_verification).
     _, max_retries = loop_limits(state)
     retry_count: int = state.get("retrieval_retry_count", 0)
-    is_final_attempt = (
-        pending_count > 0
-        and not rewrites_remaining(state, new_loop_count)
-        and retry_count >= max_retries
+    is_terminal = pending_count == 0 or (
+        not rewrites_remaining(state, new_loop_count) and retry_count >= max_retries
     )
 
-    if is_final_attempt and best_sentences is not final_sentences:
+    if is_terminal and best_sentences is not final_sentences:
         # A later pass came out worse than an earlier one — return the best.
         all_audit.append(
             _audit(
@@ -279,11 +289,11 @@ async def _run_verification(state: GraphState) -> dict[str, Any]:
         final_sentences = best_sentences
 
     # -----------------------------------------------------------------------
-    # Loop-exhaustion guard: when ALL retry budget is consumed and unresolved
-    # Tier 5 sentences still remain, they reach the final response (labelled).
-    # Emit a metric and an audit event so operators can alert on this condition.
+    # Loop-exhaustion guard: when a terminal pass still leaves unresolved Tier 5
+    # sentences in the final response (labelled), emit a metric and an audit
+    # event so operators can alert on this condition.
     # -----------------------------------------------------------------------
-    if is_final_attempt:
+    if is_terminal:
         tier5_count = sum(
             1
             for s in final_sentences

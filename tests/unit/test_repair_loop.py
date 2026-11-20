@@ -214,3 +214,19 @@ class TestBestPassIsReturned:
         assert synth.calls == 2
         assert [s["verification"]["tier"] for s in result["final_sentences"]] == [3]
         assert not any(e["event_type"] == "best_pass_selected" for e in result["audit_trail"])
+
+    async def test_dropping_citation_on_checkable_claim_restores_best_pass(self) -> None:
+        pass1 = [_sentence(1, _GOOD_QUOTE), _sentence(2, _BAD_QUOTE)]
+        evasive_rewrite = [
+            _sentence(1, _GOOD_QUOTE),
+            {
+                "sentence_id": "s_02",
+                "text": "Solid-state cells deliver 500 Wh/kg in 2025.",
+                "is_cited": False,
+                "citations": [],
+            },
+        ]
+        synth = _ScriptedSynth([pass1, evasive_rewrite])
+        result = await _run_graph(synth, {"max_rewrite_loops": 2, "max_retrieval_retries": 0})
+        assert [s["verification"]["tier"] for s in result["final_sentences"]] == [3, 5]
+        assert any(e["event_type"] == "best_pass_selected" for e in result["audit_trail"])

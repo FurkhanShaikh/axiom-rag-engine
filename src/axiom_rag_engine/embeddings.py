@@ -23,6 +23,8 @@ from axiom_rag_engine.utils.llm import call_embedding, call_embedding_sync
 
 # Budget/usage label for embedding calls (``node`` in metrics and usage).
 _NODE = "embedding"
+# Bound each embedding API call so large documents stay under provider per-request limits.
+_EMBEDDING_BATCH_SIZE = 64
 
 
 def embed_prefixes(model: str) -> tuple[str, str]:
@@ -37,11 +39,16 @@ def embed_prefixes(model: str) -> tuple[str, str]:
 
 
 def _embedding_kwargs(model: str, inputs: list[str]) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"model": model, "input": inputs}
+    settings = current_settings()
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": inputs,
+        "timeout": settings.llm_timeout_seconds,
+    }
     # Ollama models need the api_base pointed at the local server, exactly as
     # the LLM path does. Non-ollama providers read their key from the env.
     if model.startswith("ollama/"):
-        kwargs["api_base"] = current_settings().ollama_api_base
+        kwargs["api_base"] = settings.ollama_api_base
     return kwargs
 
 
@@ -59,12 +66,39 @@ def cosine(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b, strict=True))
 
 
+async def _embed_batched(
+    model: str,
+    inputs: list[str],
+    *,
+    batch_size: int = _EMBEDDING_BATCH_SIZE,
+) -> list[list[float]]:
+    """Embed ``inputs`` in bounded batches and return L2-normalized vectors."""
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    vectors: list[list[float]] = []
+    for start in range(0, len(inputs), batch_size):
+        batch = inputs[start : start + batch_size]
+        response = await call_embedding(_NODE, model, _embedding_kwargs(model, batch))
+        # LiteLLM normalizes the response to OpenAI shape: data[i]["embedding"].
+        rows = list(response["data"])
+        if rows and all(isinstance(row, dict) and "index" in row for row in rows):
+            rows.sort(key=lambda row: row["index"])
+        if len(rows) != len(batch):
+            raise ValueError(
+                f"Embedding response count mismatch: expected {len(batch)}, got {len(rows)}"
+            )
+        vectors.extend(_l2_normalize(list(row["embedding"])) for row in rows)
+    return vectors
+
+
 async def embed_query_and_chunks(
     model: str,
     query: str,
     chunk_texts: list[str],
+    *,
+    batch_size: int = _EMBEDDING_BATCH_SIZE,
 ) -> tuple[list[float], list[list[float]]]:
-    """Embed the query and chunk texts in one call; return normalized vectors.
+    """Embed the query and chunk texts; return normalized vectors.
 
     Rows are L2-normalized so ``cosine`` is a plain dot product. Applies the
     model's task prefixes (query vs document). Returns
@@ -72,13 +106,16 @@ async def embed_query_and_chunks(
     """
     doc_prefix, query_prefix = embed_prefixes(model)
     inputs = [query_prefix + query] + [doc_prefix + t for t in chunk_texts]
-    response = await call_embedding(_NODE, model, _embedding_kwargs(model, inputs))
-    # LiteLLM normalizes the response to OpenAI shape: data[i]["embedding"].
-    vectors = [_l2_normalize(list(row["embedding"])) for row in response["data"]]
+    vectors = await _embed_batched(model, inputs, batch_size=batch_size)
     return vectors[0], vectors[1:]
 
 
-async def embed_documents(model: str, texts: list[str]) -> list[list[float]]:
+async def embed_documents(
+    model: str,
+    texts: list[str],
+    *,
+    batch_size: int = _EMBEDDING_BATCH_SIZE,
+) -> list[list[float]]:
     """Embed passage/document texts with the doc-side task prefix, L2-normalized.
 
     Used by corpus ingestion to compute stored chunk vectors. Returns one vector
@@ -90,8 +127,7 @@ async def embed_documents(model: str, texts: list[str]) -> list[list[float]]:
         return []
     doc_prefix, _ = embed_prefixes(model)
     inputs = [doc_prefix + t for t in texts]
-    response = await call_embedding(_NODE, model, _embedding_kwargs(model, inputs))
-    return [_l2_normalize(list(row["embedding"])) for row in response["data"]]
+    return await _embed_batched(model, inputs, batch_size=batch_size)
 
 
 async def embed_query(model: str, query: str) -> list[float]:

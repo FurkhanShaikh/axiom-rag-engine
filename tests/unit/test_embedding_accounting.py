@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 
 from axiom_rag_engine.config.settings import Settings, get_settings
-from axiom_rag_engine.embeddings import embed_documents, embed_query_sync
+from axiom_rag_engine.embeddings import embed_documents, embed_query_and_chunks, embed_query_sync
 from axiom_rag_engine.main import create_app
 from axiom_rag_engine.nodes.retriever import MockSearchBackend
 from axiom_rag_engine.utils import llm as llm_mod
@@ -139,3 +139,50 @@ async def test_ingestion_tokens_reach_metrics_without_a_request_budget() -> None
         "axiom_llm_tokens_total", {"model": "other", "kind": "prompt"}
     )
     assert after == before + 10
+
+
+async def test_embed_documents_batches_large_inputs_preserves_order_and_sets_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AXIOM_LLM_TIMEOUT_SECONDS", "45")
+    get_settings.cache_clear()
+    seen_batches: list[list[str]] = []
+    seen_timeouts: list[Any] = []
+
+    async def _batched_aembed(**kwargs: Any) -> dict[str, Any]:
+        batch = list(kwargs["input"])
+        seen_batches.append(batch)
+        seen_timeouts.append(kwargs.get("timeout"))
+        # Return rows in reverse order with explicit index to verify re-alignment.
+        rows = [{"index": i, "embedding": [float(len(text)), 0.0]} for i, text in enumerate(batch)]
+        rows.reverse()
+        resp = _EmbeddingResponse(len(batch))
+        resp["data"] = rows
+        return resp
+
+    inputs = ["a", "bb", "ccc", "dddd", "eeeee"]
+    with patch("litellm.aembedding", side_effect=_batched_aembed):
+        vectors = await embed_documents("mock/embed", inputs, batch_size=2)
+
+    assert seen_batches == [["a", "bb"], ["ccc", "dddd"], ["eeeee"]]
+    assert seen_timeouts == [45.0, 45.0, 45.0]
+    assert len(vectors) == 5
+    # All non-zero 1D vectors L2-normalize to [1.0, 0.0].
+    assert all(v == [1.0, 0.0] for v in vectors)
+
+
+async def test_embed_query_and_chunks_batches_when_over_batch_size() -> None:
+    seen_batches: list[list[str]] = []
+
+    async def _batched_aembed(**kwargs: Any) -> _EmbeddingResponse:
+        seen_batches.append(list(kwargs["input"]))
+        return _EmbeddingResponse(len(kwargs["input"]))
+
+    with patch("litellm.aembedding", side_effect=_batched_aembed):
+        q_vec, chunk_vecs = await embed_query_and_chunks(
+            "mock/embed", "query", ["c1", "c2", "c3"], batch_size=2
+        )
+
+    assert seen_batches == [["query", "c1"], ["c2", "c3"]]
+    assert q_vec == [1.0, 0.0]
+    assert len(chunk_vecs) == 3

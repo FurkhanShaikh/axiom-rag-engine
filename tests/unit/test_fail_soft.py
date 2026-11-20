@@ -166,6 +166,15 @@ class TestLaterPassFailureReturnsBestPass:
         assert _tiers(result) == [("s_01", 3), ("s_02", 5)]
         assert marshal_response("req_fail_soft", result).status == "partial"
 
+    async def test_empty_sentences_with_is_answerable_true_halts_as_gave_up(self) -> None:
+        empty_answerable = json.dumps({"is_answerable": True, "sentences": []})
+        result = await _run([_FIRST_DRAFT, empty_answerable])
+
+        assert result["halt_reason"] == "synthesizer_gave_up"
+        assert result["is_answerable"] is True
+        assert _tiers(result) == [("s_01", 3), ("s_02", 5)]
+        assert marshal_response("req_fail_soft", result).status == "partial"
+
     async def test_all_searches_fail_on_re_retrieval(self) -> None:
         # No rewrites: the first pass's Tier 5 goes straight to re-retrieval,
         # where every search now errors.
@@ -178,6 +187,79 @@ class TestLaterPassFailureReturnsBestPass:
         assert result["halt_reason"] == "node_error"
         assert _tiers(result) == [("s_01", 3), ("s_02", 5)]
         assert _halt_events(result)[0]["node"] == "re_retriever"
+
+    async def test_degraded_all_unverified_rewrite_does_not_overwrite_verified_pass(
+        self,
+    ) -> None:
+        # Pass 1 verifies s_01 (Tier 3) and fails s_02 (Tier 5). Pass 2 rewrites
+        # s_01 slightly (misses semantic cache) while the verifier errors out,
+        # degrading Pass 2 to all-unverified with 0 rewrite requests. Pass 1 must
+        # still be returned instead of the degraded Pass 2.
+        pass2 = json.dumps(
+            {
+                "is_answerable": True,
+                "sentences": [
+                    {
+                        "sentence_id": "s_01",
+                        "text": "Solid-state cells rely on solid ceramic electrolytes.",
+                        "is_cited": True,
+                        "citations": [
+                            {
+                                "citation_id": "cite_1",
+                                "chunk_id": "doc_1_chunk_A",
+                                "exact_source_quote": _GOOD_QUOTE,
+                            }
+                        ],
+                    },
+                    {
+                        "sentence_id": "s_02",
+                        "text": "They improve thermal stability.",
+                        "is_cited": True,
+                        "citations": [
+                            {
+                                "citation_id": "cite_2",
+                                "chunk_id": "doc_1_chunk_A",
+                                "exact_source_quote": (
+                                    "This substitution significantly improves thermal stability"
+                                ),
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+        replies = [_FIRST_DRAFT, pass2]
+        synth_calls = 0
+
+        async def _fake(node: str, model: str, messages: Any, **_: Any) -> str:
+            nonlocal synth_calls
+            consume_llm_budget(node)
+            if node == "synthesizer":
+                synth_calls += 1
+                return replies.pop(0)
+            if synth_calls >= 2:
+                raise RuntimeError("verifier outage during rewrite")
+            return _SEMANTIC_PASS
+
+        state = make_initial_state(
+            request_id="req_degraded_rewrite",
+            user_query="What are solid-state batteries?",
+            app_config={},
+            models_config={"synthesizer": "mock/s", "verifier": "mock/v"},
+            pipeline_config={"stages": {"semantic_verification_enabled": True}},
+        )
+        reset_llm_budget(max_calls=50)
+        with (
+            patch("axiom_rag_engine.nodes.synthesizer.call_llm", _fake),
+            patch("axiom_rag_engine.nodes.semantic.call_llm", _fake),
+        ):
+            result = await build_axiom_graph().ainvoke(
+                state, config={"configurable": {"search_backend": _Backend()}}
+            )
+
+        assert _tiers(result) == [("s_01", 3), ("s_02", 5)]
+        assert result["final_sentences"][0]["verification"]["tier_label"] == "model_assisted"
+        assert any(e["event_type"] == "best_pass_selected" for e in result["audit_trail"])
 
 
 class TestFirstPassFailureStillPropagates:

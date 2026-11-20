@@ -14,8 +14,8 @@ Where things live:
   - axiom_rag_engine.services           — the per-app AppServices container
   - axiom_rag_engine.api.routes.*       — endpoints, one module per resource
   - axiom_rag_engine.api.auth           — API key authentication
-  - axiom_rag_engine.api.rate_limit     — slowapi limiter + bucketing
-  - axiom_rag_engine.api.middleware     — request-body size limit
+  - axiom_rag_engine.api.rate_limit     — pure ASGI async rate limiter + bucketing
+  - axiom_rag_engine.api.middleware     — pure ASGI request-body size limit
 """
 
 from __future__ import annotations
@@ -27,14 +27,13 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request  # noqa: F401 — HTTPException re-exported
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
+from fastapi.responses import JSONResponse
 
 from axiom_rag_engine.api.auth import verify_api_key  # noqa: F401 — re-exported
-from axiom_rag_engine.api.middleware import make_body_size_middleware
+from axiom_rag_engine.api.middleware import BodySizeLimitMiddleware
 from axiom_rag_engine.api.rate_limit import (  # noqa: F401 — re-exported
+    RateLimiter,
+    RateLimitMiddleware,
     build_limiter,
     get_real_ip,
     rate_limit_key,
@@ -43,7 +42,6 @@ from axiom_rag_engine.api.routes import audits, documents, ops, synthesize
 from axiom_rag_engine.bootstrap import VERSION, build_services
 from axiom_rag_engine.config.logging import configure_logging, request_id_ctx
 from axiom_rag_engine.config.observability import (
-    RATE_LIMIT_REJECTIONS,
     instrument_app,
     setup_prometheus,
     setup_tracing,
@@ -81,6 +79,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         logger.info("Axiom Engine shutting down.")
         await services.cache.aclose()
+        limiter = getattr(app.state, "limiter", None)
+        if limiter is not None:
+            await limiter.aclose()
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -90,12 +91,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     logger.exception("Unhandled exception for request %s", request_id)
     error_response = make_error_response(request_id, exc)
     return JSONResponse(status_code=500, content=error_response.model_dump())
-
-
-def _count_rate_limited(request: Request, exc: RateLimitExceeded) -> Response:
-    """slowapi's 429 response, counted."""
-    RATE_LIMIT_REJECTIONS.inc()
-    return _rate_limit_exceeded_handler(request, exc)
 
 
 def _cors_origins(settings: Settings) -> list[str]:
@@ -148,6 +143,19 @@ def create_app(
     app.state.settings_override = settings
     app.state.search_backend_override = search_backend
 
+    limiter = build_limiter(config, exempt_paths=ops.RATE_LIMIT_EXEMPT_PATHS | {"/metrics"})
+    app.state.limiter = limiter
+
+    # Starlette executes add_middleware LIFO (last added is outermost):
+    #   CORSMiddleware (outermost — adds CORS headers to 429/413/400/500 and handles preflight)
+    #   -> RateLimitMiddleware (rejects 429 before reading chunked bodies)
+    #   -> BodySizeLimitMiddleware (innermost — caps body before route parsing)
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_body_bytes=config.max_body_bytes,
+        max_document_bytes=config.max_document_bytes,
+    )
+    app.add_middleware(RateLimitMiddleware, limiter=limiter)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(config),
@@ -156,23 +164,13 @@ def create_app(
         allow_headers=["X-API-Key", "Content-Type"],
     )
 
-    limiter = build_limiter(config)
-    app.state.limiter = limiter
-    app.add_middleware(SlowAPIMiddleware)
-    app.add_exception_handler(RateLimitExceeded, _count_rate_limited)  # type: ignore[arg-type]
-    for endpoint in ops.RATE_LIMIT_EXEMPT:
-        limiter.exempt(endpoint)
-
-    app.middleware("http")(
-        make_body_size_middleware(config.max_body_bytes, config.max_document_bytes)
-    )
     # Scrapes are not rate-limited; protect them with AXIOM_METRICS_TOKEN instead.
-    limiter.exempt(setup_prometheus(app, config.metrics_token))
+    setup_prometheus(app, config.metrics_token)
     instrument_app(app)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(ops.router)
-    app.include_router(synthesize.build_router(limiter, config.stream_rate_limit))
+    app.include_router(synthesize.router)
     app.include_router(audits.router)
     app.include_router(documents.router)
     return app
