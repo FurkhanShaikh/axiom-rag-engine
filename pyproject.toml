@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.12.5,<3.0",
     "pydantic-settings>=2.5,<3.0",
-    "litellm>=1.82,<2.0",
+    "litellm>=1.104.0,<2.0",  # security floor (CVE-2026-114612)
     "langgraph>=1.1,<2.0",
     # <0.137: FastAPI 0.137 mounts included routers as one wrapper route, which
     # slowapi's middleware cannot see into, so default rate limits silently stop
@@ -48,14 +48,14 @@ dependencies = [
     "pysbd>=0.3.4",
     "prometheus-client>=0.21",
     "prometheus-fastapi-instrumentator>=8.0",
-    "opentelemetry-api>=1.27",
-    "opentelemetry-sdk>=1.27",
-    "opentelemetry-exporter-otlp>=1.27",
+    "opentelemetry-api>=1.45.2",  # security floor (CVE-2026-114603, CVE-2026-126360)
+    "opentelemetry-sdk>=1.45.2",
+    "opentelemetry-exporter-otlp>=1.45.2",
     "opentelemetry-instrumentation-fastapi>=0.48b0",
     "langchain-core>=1.2.28",
     "starlette>=1.0.1",  # security floor; also requires instrumentator>=8 (7.x caps starlette<1)
     "python-multipart>=0.0.32",
-    "pypdf>=6.16.1",  # security floor (PYSEC-2026-3655/3656/3910-3913)
+    "pypdf>=6.21.4",  # security floor (CVE-2026-113786..119209)
 ]
 
 [project.optional-dependencies]
@@ -104,7 +104,7 @@ dev = [
 minversion = "8.4"
 addopts = "-ra -q --cov=axiom_rag_engine --cov-report=term-missing"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 asyncio_mode = "auto"
 markers = [
     "integration: tests requiring a live Ollama instance (deselect with '-m \"not integration\"')",
