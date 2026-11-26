@@ -25,7 +25,7 @@ jobs:
   semantic-verifier:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Choose the verifier from the configured key
         id: guard
@@ -62,7 +62,7 @@ jobs:
 
       - name: Install uv
         if: steps.guard.outputs.run == 'true'
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
 
       - name: Set up Python
         if: steps.guard.outputs.run == 'true'
@@ -94,7 +94,7 @@ jobs:
 
       - name: Upload eval results
         if: steps.guard.outputs.run == 'true' && always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: semantic-eval-results
           path: evals/results/semantic-*.json

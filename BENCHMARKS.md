@@ -474,22 +474,31 @@ fixed or live.
 
 | Table | Reproduce with | Inputs | Raw per-query records |
 |---|---|---|---|
-| Retrieval — SciFact dev (BM25 row) | `python tasks.py evals retrieval -- --limit 0` | public dataset, deterministic | `eval-gate-results` artifact of every CI run |
-| Production-shaped retrieval, quality-weight sweep | `python tasks.py evals pipeline-retrieval -- --limit 0 [--sweep]` | public dataset, deterministic | `eval-gate-results` artifact (pool 10 row) |
-| End-to-end golden set (deterministic) | `python tasks.py evals e2e -- --validate-only` | committed golden set | `eval-gate-results` artifact |
+| Retrieval — SciFact dev (BM25 row) | `python tasks.py evals retrieval -- --limit 0` | public dataset, deterministic | [`eval-gate-results`](https://github.com/FurkhanShaikh/axiom-rag-engine/actions/workflows/ci.yml) CI artifact (also in bundle below) |
+| Production-shaped retrieval, quality-weight sweep | `python tasks.py evals pipeline-retrieval -- --limit 0 [--sweep]` | public dataset, deterministic | [`eval-gate-results`](https://github.com/FurkhanShaikh/axiom-rag-engine/actions/workflows/ci.yml) CI artifact (pool 10 row; also in bundle below) |
+| End-to-end golden set (deterministic) | `python tasks.py evals e2e -- --validate-only` | committed golden set | [`eval-gate-results`](https://github.com/FurkhanShaikh/axiom-rag-engine/actions/workflows/ci.yml) CI artifact (also in bundle below) |
 | Corpus search latency | `python evals/corpus_eval.py --bench-search 10000` | synthetic, seeded | printed |
-| Dense / hybrid / rerank / paraphrase rows | `python tasks.py evals retrieval -- --method …` | local embedder or LLM grades, LLM paraphrases | evals bundle (caches) |
-| Query expansion, tier calibration | the eval commands above | **live** Tavily results + LLM judge | evals bundle (Tavily caches pin the results) |
-| Semantic verifier, keyed e2e | the eval commands above | provider model | evals bundle |
+| Dense / hybrid / rerank / paraphrase rows | `python tasks.py evals retrieval -- --method …` | local embedder or LLM grades, LLM paraphrases | [`evals-bundle-2026-11-26.tar.gz`](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/download/eval-data-2026-11-26/evals-bundle-2026-11-26.tar.gz) ([release](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/tag/eval-data-2026-11-26)) |
+| Query expansion, tier calibration | the eval commands above | **live** Tavily results + LLM judge | [`evals-bundle-2026-11-26.tar.gz`](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/download/eval-data-2026-11-26/evals-bundle-2026-11-26.tar.gz) ([release](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/tag/eval-data-2026-11-26)) |
+| Semantic verifier, keyed e2e | the eval commands above | provider model | [`evals-bundle-2026-11-26.tar.gz`](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/download/eval-data-2026-11-26/evals-bundle-2026-11-26.tar.gz) ([release](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/tag/eval-data-2026-11-26)) |
 
 Live search results drift, so the web-shaped numbers are only reproducible
-from the cached responses they were measured on. After a run worth
-publishing, bundle the raw results and caches (SHA-256 manifest and commit
-included) and attach the archive to a GitHub release:
+from the cached responses they were measured on. The current published bundle
+([`eval-data-2026-11-26`](https://github.com/FurkhanShaikh/axiom-rag-engine/releases/tag/eval-data-2026-11-26),
+78 files, SHA-256 verified) restores all raw results and pinned caches so you
+can re-grade the cached runs without spending search credits:
 
 ```bash
+# 1. Download and verify + unpack the published bundle
+curl -fsSLO https://github.com/FurkhanShaikh/axiom-rag-engine/releases/download/eval-data-2026-11-26/evals-bundle-2026-11-26.tar.gz
+python tasks.py evals bundle -- unpack evals-bundle-2026-11-26.tar.gz
+
+# 2. Re-grade cached ASQA calibration or live Tavily query-expansion runs
+python tasks.py evals calibration -- --phase judge --judge <model>
+python tasks.py evals query-expansion -- --judge <model>
+
+# Pack a new bundle after future eval runs
 python tasks.py evals bundle -- pack            # evals-bundle-<date>.tar.gz
-python tasks.py evals bundle -- unpack evals-bundle-<date>.tar.gz   # verify + restore
 ```
 
 `unpack` refuses an archive whose files do not match its manifest. With the
